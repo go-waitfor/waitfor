@@ -17,7 +17,7 @@
 ## Resource URLs
 All resource locations start with url schema type e.g. ``file://./myfile`` or ``postgres://locahost:5432/mydb?user=user&password=test``
 
-## Library
+## Quick start
 
 ### Test resource availability
 
