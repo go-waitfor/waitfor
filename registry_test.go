@@ -12,7 +12,7 @@ type TestResource struct {
 	calls int
 }
 
-func (t *TestResource) Test(ctx context.Context) error {
+func (t *TestResource) Test(_ context.Context) error {
 	t.calls++
 	return nil
 }
