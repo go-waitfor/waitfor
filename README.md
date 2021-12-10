@@ -7,12 +7,12 @@
 - Extensibility. Different types of remote resource (``http(s)``, ``proc``, ``postgres``, ``mysql``).
 
 ## Resources
-- File (``file://``) [waitfor-fs](https://github.com/go-waitfor/waitfor-fs)
-- OS Process (``proc://``) [waitfor-proc](https://github.com/go-waitfor/waitfor-proc)
-- HTTP(S) Endpoint (``http://`` & ``https://``) [waitfor-http](https://github.com/go-waitfor/waitfor-http)
-- MongoDB (``mongodb://``) [waitfor-mongodb](https://github.com/go-waitfor/waitfor-mongodb)
-- Postgres (``postgres://``) [waitfor-postgres](https://github.com/go-waitfor/waitfor-postgres)
-- MySQL/MariaDB (``mysql://`` & ``mariadb://``) [waitfor-mysql](https://github.com/go-waitfor/waitfor-mysql)
+- [File](https://github.com/go-waitfor/waitfor-fs) (``file://``)
+- [OS Process](https://github.com/go-waitfor/waitfor-proc) (``proc://``)
+- [HTTP(S) Endpoint](https://github.com/go-waitfor/waitfor-http) (``http://`` & ``https://``)
+- [MongoDB](https://github.com/go-waitfor/waitfor-mongodb) (``mongodb://``)
+- [Postgres](https://github.com/go-waitfor/waitfor-postgres) (``postgres://``)
+- [MySQL/MariaDB](https://github.com/go-waitfor/waitfor-mysql) (``mysql://`` & ``mariadb://``)
 
 ## Resource URLs
 All resource locations start with url schema type e.g. ``file://./myfile`` or ``postgres://locahost:5432/mydb?user=user&password=test``
