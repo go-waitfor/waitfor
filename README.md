@@ -89,7 +89,7 @@ func main() {
 ```
 
 ### Extend
-Starting v2, ``waitfor`` allows register custom resource assertions:
+``waitfor`` allows register custom resource assertions:
 
 ```go
 package main
