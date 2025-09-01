@@ -41,7 +41,7 @@ func TestRegistry_Register(t *testing.T) {
 func TestRegistry_Register_NewScheme(t *testing.T) {
 	r := newRegistry([]ResourceConfig{})
 	
-	factory := func(u *url.URL) (Resource, error) {
+	factory := func(_ *url.URL) (Resource, error) {
 		return &TestResource{}, nil
 	}
 	
@@ -55,7 +55,7 @@ func TestRegistry_Register_NewScheme(t *testing.T) {
 }
 
 func TestRegistry_Register_DuplicateScheme(t *testing.T) {
-	factory := func(u *url.URL) (Resource, error) {
+	factory := func(_ *url.URL) (Resource, error) {
 		return &TestResource{}, nil
 	}
 	
@@ -75,7 +75,7 @@ func TestRegistry_Register_DuplicateScheme(t *testing.T) {
 func TestRegistry_Register_WithWhitespace(t *testing.T) {
 	r := newRegistry([]ResourceConfig{})
 	
-	factory := func(u *url.URL) (Resource, error) {
+	factory := func(_ *url.URL) (Resource, error) {
 		return &TestResource{}, nil
 	}
 	
@@ -109,7 +109,7 @@ func TestRegistry_Resolve_UnknownScheme(t *testing.T) {
 }
 
 func TestRegistry_Resolve_FactoryError(t *testing.T) {
-	factory := func(u *url.URL) (Resource, error) {
+	factory := func(_ *url.URL) (Resource, error) {
 		return nil, errors.New("factory error")
 	}
 	
@@ -127,7 +127,7 @@ func TestRegistry_Resolve_FactoryError(t *testing.T) {
 }
 
 func TestRegistry_List(t *testing.T) {
-	factory := func(u *url.URL) (Resource, error) {
+	factory := func(_ *url.URL) (Resource, error) {
 		return &TestResource{}, nil
 	}
 	

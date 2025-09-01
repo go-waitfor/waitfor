@@ -11,7 +11,7 @@ func TestUse(t *testing.T) {
 	// Create a mock module function
 	mockModule := func() ([]string, ResourceFactory) {
 		schemes := []string{"mock", "test"}
-		factory := func(u *url.URL) (Resource, error) {
+		factory := func(_ *url.URL) (Resource, error) {
 			return &TestResource{}, nil
 		}
 		return schemes, factory
@@ -34,7 +34,7 @@ func TestUse_WithEmptySchemes(t *testing.T) {
 	// Create a module with empty schemes
 	mockModule := func() ([]string, ResourceFactory) {
 		schemes := []string{}
-		factory := func(u *url.URL) (Resource, error) {
+		factory := func(_ *url.URL) (Resource, error) {
 			return &TestResource{}, nil
 		}
 		return schemes, factory
