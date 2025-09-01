@@ -184,8 +184,8 @@ func (r *Runner) testInternal(ctx context.Context, resource string, opts options
 	b.Multiplier = opts.multiplier
 	b.RandomizationFactor = opts.randomizationFactor
 
-	_, err = backoff.Retry(ctx, func() (bool, error) {
-		return false, rsc.Test(ctx)
+		err := rsc.Test(ctx)
+		return err != nil, err
 	}, backoff.WithMaxTries(uint(opts.attempts)))
 
 	return err
