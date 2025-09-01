@@ -29,7 +29,7 @@ import (
 	"os/exec"
 	"sync"
 
-	"github.com/cenkalti/backoff"
+	"github.com/cenkalti/backoff/v5"
 )
 
 type (
@@ -109,8 +109,10 @@ func (r *Runner) Run(ctx context.Context, program Program, setters ...Option) ([
 //
 // The setters parameter allows customization of retry behavior including:
 // - Initial retry interval (WithInterval)
-// - Maximum retry interval (WithMaxInterval)  
+// - Maximum retry interval (WithMaxInterval)
 // - Number of retry attempts (WithAttempts)
+// - Multiplier for exponential backoff (WithMultiplier)
+// - Randomization factor for backoff intervals (WithRandomizationFactor)
 //
 // Example:
 //
@@ -142,7 +144,7 @@ func (r *Runner) Test(ctx context.Context, resources []string, setters ...Option
 // testAllInternal concurrently tests all provided resources and returns a channel
 // of errors. Each resource is tested in its own goroutine with the specified options.
 // The channel is closed when all tests complete.
-func (r *Runner) testAllInternal(ctx context.Context, resources []string, opts Options) <-chan error {
+func (r *Runner) testAllInternal(ctx context.Context, resources []string, opts options) <-chan error {
 	var wg sync.WaitGroup
 	wg.Add(len(resources))
 
@@ -169,7 +171,7 @@ func (r *Runner) testAllInternal(ctx context.Context, resources []string, opts O
 // testInternal tests a single resource with retry logic using exponential backoff.
 // It resolves the resource from the registry and applies the configured retry
 // strategy until the resource test passes or max attempts are reached.
-func (r *Runner) testInternal(ctx context.Context, resource string, opts Options) error {
+func (r *Runner) testInternal(ctx context.Context, resource string, opts options) error {
 	rsc, err := r.registry.Resolve(resource)
 
 	if err != nil {
@@ -179,8 +181,12 @@ func (r *Runner) testInternal(ctx context.Context, resource string, opts Options
 	b := backoff.NewExponentialBackOff()
 	b.InitialInterval = opts.interval
 	b.MaxInterval = opts.maxInterval
+	b.Multiplier = opts.multiplier
+	b.RandomizationFactor = opts.randomizationFactor
 
-	return backoff.Retry(func() error {
-		return rsc.Test(ctx)
-	}, backoff.WithContext(backoff.WithMaxRetries(b, opts.attempts), ctx))
+	_, err = backoff.Retry(ctx, func() (bool, error) {
+		return false, rsc.Test(ctx)
+	}, backoff.WithMaxTries(uint(opts.attempts)))
+
+	return err
 }

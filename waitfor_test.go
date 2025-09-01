@@ -212,7 +212,7 @@ func TestRunner_testInternal_ResolutionError(t *testing.T) {
 	runner := New() // No resources registered
 
 	ctx := context.Background()
-	opts := Options{
+	opts := options{
 		interval:    time.Second,
 		maxInterval: time.Minute,
 		attempts:    1,
@@ -231,7 +231,7 @@ func TestRunner_testInternal_ResourceTestError(t *testing.T) {
 	runner := New(config)
 
 	ctx := context.Background()
-	opts := Options{
+	opts := options{
 		interval:    1 * time.Millisecond, // Very short for testing
 		maxInterval: 2 * time.Millisecond,
 		attempts:    1, // Only one attempt to avoid long test time
@@ -249,7 +249,7 @@ func TestRunner_testAllInternal(t *testing.T) {
 	runner := New(config)
 
 	ctx := context.Background()
-	opts := Options{
+	opts := options{
 		interval:    time.Millisecond,
 		maxInterval: time.Millisecond * 10,
 		attempts:    1,
@@ -277,7 +277,7 @@ func TestRunner_testAllInternal_WithErrors(t *testing.T) {
 	runner := New(config)
 
 	ctx := context.Background()
-	opts := Options{
+	opts := options{
 		interval:    time.Millisecond,
 		maxInterval: time.Millisecond * 10,
 		attempts:    1,

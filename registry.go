@@ -2,7 +2,7 @@ package waitfor
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 )
@@ -84,7 +84,7 @@ func (r *Registry) Register(scheme string, factory ResourceFactory) error {
 	_, exists := r.resources[scheme]
 
 	if exists {
-		return errors.New("resource is already registered with a given scheme:" + scheme)
+		return fmt.Errorf("%w: %s", ErrResourceAlreadyRegistered, scheme)
 	}
 
 	r.resources[scheme] = factory
@@ -113,7 +113,7 @@ func (r *Registry) Resolve(location string) (Resource, error) {
 	rf, found := r.resources[u.Scheme]
 
 	if !found {
-		return nil, errors.New("resource with a given scheme is not found:" + u.Scheme)
+		return nil, fmt.Errorf("%w: %s", ErrResourceNotFound, u.Scheme)
 	}
 
 	return rf(u)

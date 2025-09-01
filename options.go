@@ -2,34 +2,40 @@ package waitfor
 
 import (
 	"time"
+
+	"github.com/cenkalti/backoff/v5"
 )
 
 type (
-	// Options contains configuration parameters for resource testing behavior.
+	// options contains configuration parameters for resource testing behavior.
 	// These options control retry intervals, maximum wait times, and the number
 	// of attempts made when testing resource availability.
-	Options struct {
-		interval    time.Duration // Initial retry interval between attempts
-		maxInterval time.Duration // Maximum interval for exponential backoff
-		attempts    uint64        // Maximum number of retry attempts
+	options struct {
+		interval            time.Duration // Initial retry interval between attempts
+		maxInterval         time.Duration // Maximum interval for exponential backoff
+		attempts            uint64        // Maximum number of retry attempts
+		multiplier          float64       // Multiplier for exponential backoff
+		randomizationFactor float64       // Randomization factor for backoff intervals
 	}
 
-	// Option is a function type used to configure Options through the functional
+	// Option is a function type used to configure options through the functional
 	// options pattern. This allows flexible and extensible configuration of
 	// resource testing behavior.
-	Option func(opts *Options)
+	Option func(opts *options)
 )
 
-// newOptions creates a new Options instance with default values and applies
+// newOptions creates a new options instance with default values and applies
 // the provided option setters. Default values are:
 // - interval: 5 seconds
-// - maxInterval: 60 seconds  
+// - maxInterval: 60 seconds
 // - attempts: 5.
-func newOptions(setters []Option) *Options {
-	opts := &Options{
-		interval:    time.Duration(5) * time.Second,
-		maxInterval: time.Duration(60) * time.Second,
-		attempts:    5,
+func newOptions(setters []Option) *options {
+	opts := &options{
+		interval:            time.Duration(5) * time.Second,
+		maxInterval:         time.Duration(60) * time.Second,
+		attempts:            5,
+		multiplier:          backoff.DefaultMultiplier,
+		randomizationFactor: backoff.DefaultRandomizationFactor,
 	}
 
 	for _, setter := range setters {
@@ -47,7 +53,7 @@ func newOptions(setters []Option) *Options {
 //
 //	runner.Test(ctx, resources, waitfor.WithInterval(2)) // Start with 2 second intervals
 func WithInterval(interval uint64) Option {
-	return func(opts *Options) {
+	return func(opts *options) {
 		opts.interval = time.Duration(interval) * time.Second
 	}
 }
@@ -60,7 +66,7 @@ func WithInterval(interval uint64) Option {
 //
 //	runner.Test(ctx, resources, waitfor.WithMaxInterval(30)) // Cap at 30 seconds
 func WithMaxInterval(interval uint64) Option {
-	return func(opts *Options) {
+	return func(opts *options) {
 		opts.maxInterval = time.Duration(interval) * time.Second
 	}
 }
@@ -73,7 +79,30 @@ func WithMaxInterval(interval uint64) Option {
 //
 //	runner.Test(ctx, resources, waitfor.WithAttempts(10)) // Try up to 10 times
 func WithAttempts(attempts uint64) Option {
-	return func(opts *Options) {
+	return func(opts *options) {
 		opts.attempts = attempts
+	}
+}
+
+// WithMultiplier creates an Option that sets the multiplier for exponential backoff.
+// This value determines how quickly the retry interval increases after each attempt.
+// A higher multiplier results in faster growth of the interval.
+//
+// Example:
+//
+//	runner.Test(ctx, resources, waitfor.WithMultiplier(2.0)) // Double the interval each time
+func WithMultiplier(multiplier float64) Option {
+	return func(opts *options) {
+		opts.multiplier = multiplier
+	}
+}
+
+// WithRandomizationFactor creates an Option that sets the randomization factor for
+// exponential backoff. This factor introduces jitter to the retry intervals,
+// helping to prevent thundering herd problems when multiple clients are retrying
+// simultaneously.
+func WithRandomizationFactor(factor float64) Option {
+	return func(opts *options) {
+		opts.randomizationFactor = factor
 	}
 }
