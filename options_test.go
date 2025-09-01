@@ -31,7 +31,7 @@ func TestNewOptions_WithSetters(t *testing.T) {
 
 func TestWithInterval(t *testing.T) {
 	option := WithInterval(30)
-	opts := &Options{}
+	opts := &options{}
 
 	option(opts)
 
@@ -40,7 +40,7 @@ func TestWithInterval(t *testing.T) {
 
 func TestWithMaxInterval(t *testing.T) {
 	option := WithMaxInterval(90)
-	opts := &Options{}
+	opts := &options{}
 
 	option(opts)
 
@@ -49,7 +49,7 @@ func TestWithMaxInterval(t *testing.T) {
 
 func TestWithAttempts(t *testing.T) {
 	option := WithAttempts(20)
-	opts := &Options{}
+	opts := &options{}
 
 	option(opts)
 
@@ -66,4 +66,20 @@ func TestCombinedOptions(t *testing.T) {
 	assert.Equal(t, time.Duration(2)*time.Second, opts.interval)
 	assert.Equal(t, time.Duration(30)*time.Second, opts.maxInterval)
 	assert.Equal(t, uint64(8), opts.attempts)
+}
+
+func TestWithMultiplier(t *testing.T) {
+	opts := newOptions([]Option{
+		WithMultiplier(2.5),
+	})
+
+	assert.Equal(t, 2.5, opts.multiplier)
+}
+
+func TestWithRandomizationFactor(t *testing.T) {
+	opts := newOptions([]Option{
+		WithRandomizationFactor(0.3),
+	})
+
+	assert.Equal(t, 0.3, opts.randomizationFactor)
 }

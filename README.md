@@ -535,6 +535,8 @@ func main() {
 
 - `ErrWait`: Returned when resources are not available after all retry attempts
 - `ErrInvalidArgument`: Returned for invalid input parameters
+- `ErrResourceNotFound`: Returned when a resource type is not registered
+- `ErrResourceAlreadyRegistered`: Returned when trying to register a resource type that already exists
 
 ### Error Handling Patterns
 
