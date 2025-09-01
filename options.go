@@ -2,8 +2,6 @@ package waitfor
 
 import (
 	"time"
-
-	"github.com/cenkalti/backoff/v5"
 )
 
 type (
@@ -29,13 +27,15 @@ type (
 // - interval: 5 seconds
 // - maxInterval: 60 seconds
 // - attempts: 5.
+// - multiplier: 1.5
+// - randomizationFactor: 0.5
 func newOptions(setters []Option) *options {
 	opts := &options{
 		interval:            time.Duration(5) * time.Second,
 		maxInterval:         time.Duration(60) * time.Second,
 		attempts:            5,
-		multiplier:          backoff.DefaultMultiplier,
-		randomizationFactor: backoff.DefaultRandomizationFactor,
+		multiplier:          1.5,
+		randomizationFactor: 0.5,
 	}
 
 	for _, setter := range setters {
@@ -101,6 +101,10 @@ func WithMultiplier(multiplier float64) Option {
 // exponential backoff. This factor introduces jitter to the retry intervals,
 // helping to prevent thundering herd problems when multiple clients are retrying
 // simultaneously.
+//
+// Example:
+//
+//	runner.Test(ctx, resources, waitfor.WithRandomizationFactor(0.5)) // 50% jitter
 func WithRandomizationFactor(factor float64) Option {
 	return func(opts *options) {
 		opts.randomizationFactor = factor
