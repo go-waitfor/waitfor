@@ -40,14 +40,14 @@ func TestRegistry_Register(t *testing.T) {
 
 func TestRegistry_Register_NewScheme(t *testing.T) {
 	r := newRegistry([]ResourceConfig{})
-	
+
 	factory := func(_ *url.URL) (Resource, error) {
 		return &TestResource{}, nil
 	}
-	
+
 	err := r.Register("custom", factory)
 	assert.NoError(t, err)
-	
+
 	// Verify the scheme was registered
 	rsc, err := r.Resolve("custom://test")
 	assert.NoError(t, err)
@@ -58,14 +58,14 @@ func TestRegistry_Register_DuplicateScheme(t *testing.T) {
 	factory := func(_ *url.URL) (Resource, error) {
 		return &TestResource{}, nil
 	}
-	
+
 	r := newRegistry([]ResourceConfig{
 		{
 			Scheme:  []string{"existing"},
 			Factory: factory,
 		},
 	})
-	
+
 	// Try to register the same scheme again
 	err := r.Register("existing", factory)
 	assert.Error(t, err)
@@ -74,15 +74,15 @@ func TestRegistry_Register_DuplicateScheme(t *testing.T) {
 
 func TestRegistry_Register_WithWhitespace(t *testing.T) {
 	r := newRegistry([]ResourceConfig{})
-	
+
 	factory := func(_ *url.URL) (Resource, error) {
 		return &TestResource{}, nil
 	}
-	
+
 	// Register with whitespace - should be trimmed
 	err := r.Register("  spaced  ", factory)
 	assert.NoError(t, err)
-	
+
 	// Verify it was registered with trimmed name
 	rsc, err := r.Resolve("spaced://test")
 	assert.NoError(t, err)
@@ -91,7 +91,7 @@ func TestRegistry_Register_WithWhitespace(t *testing.T) {
 
 func TestRegistry_Resolve_InvalidURL(t *testing.T) {
 	r := newRegistry([]ResourceConfig{})
-	
+
 	// Test with invalid URL
 	rsc, err := r.Resolve("://invalid-url")
 	assert.Error(t, err)
@@ -100,7 +100,7 @@ func TestRegistry_Resolve_InvalidURL(t *testing.T) {
 
 func TestRegistry_Resolve_UnknownScheme(t *testing.T) {
 	r := newRegistry([]ResourceConfig{})
-	
+
 	// Test with unknown scheme
 	rsc, err := r.Resolve("unknown://test")
 	assert.Error(t, err)
@@ -112,14 +112,14 @@ func TestRegistry_Resolve_FactoryError(t *testing.T) {
 	factory := func(_ *url.URL) (Resource, error) {
 		return nil, errors.New("factory error")
 	}
-	
+
 	r := newRegistry([]ResourceConfig{
 		{
 			Scheme:  []string{"error"},
 			Factory: factory,
 		},
 	})
-	
+
 	rsc, err := r.Resolve("error://test")
 	assert.Error(t, err)
 	assert.Nil(t, rsc)
@@ -130,14 +130,14 @@ func TestRegistry_List(t *testing.T) {
 	factory := func(_ *url.URL) (Resource, error) {
 		return &TestResource{}, nil
 	}
-	
+
 	r := newRegistry([]ResourceConfig{
 		{
 			Scheme:  []string{"http", "https", "custom"},
 			Factory: factory,
 		},
 	})
-	
+
 	schemes := r.List()
 	assert.Len(t, schemes, 3)
 	assert.Contains(t, schemes, "http")
@@ -147,7 +147,7 @@ func TestRegistry_List(t *testing.T) {
 
 func TestRegistry_List_Empty(t *testing.T) {
 	r := newRegistry([]ResourceConfig{})
-	
+
 	schemes := r.List()
 	assert.Empty(t, schemes)
 }
