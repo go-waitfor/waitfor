@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestResourceSuccess is a mock resource that always succeeds
+// TestResourceSuccess is a mock resource that always succeeds.
 type TestResourceSuccess struct {
 	calls int
 }
@@ -20,7 +20,7 @@ func (t *TestResourceSuccess) Test(_ context.Context) error {
 	return nil
 }
 
-// TestResourceFailure is a mock resource that always fails
+// TestResourceFailure is a mock resource that always fails.
 type TestResourceFailure struct {
 	calls int
 }
@@ -30,7 +30,7 @@ func (t *TestResourceFailure) Test(_ context.Context) error {
 	return errors.New("resource not available")
 }
 
-// MockResourceFactory creates test resources
+// MockResourceFactory creates test resources.
 func MockResourceFactory(u *url.URL) (Resource, error) {
 	if u.Host == "success" {
 		return &TestResourceSuccess{}, nil
