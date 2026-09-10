@@ -1,90 +1,63 @@
 package waitfor
 
 import (
-	"context"
 	"fmt"
-	"net/url"
+	"sort"
 	"strings"
+	"sync"
 )
 
-type (
-	// ResourceFactory is a function type that creates Resource instances from URLs.
-	// Each factory is responsible for parsing the URL and creating the appropriate
-	// resource implementation that can test the specific resource type.
-	//
-	// Example:
-	//
-	//	func httpResourceFactory(u *url.URL) (Resource, error) {
-	//		return &HTTPResource{url: u}, nil
-	//	}
-	ResourceFactory func(u *url.URL) (Resource, error)
-
-	// ResourceConfig defines the configuration for a resource type, mapping
-	// URL schemes to their corresponding factory functions. This allows
-	// the system to support multiple resource types through a plugin-like architecture.
-	//
-	// Example:
-	//
-	//	config := ResourceConfig{
-	//		Scheme:  []string{"http", "https"},
-	//		Factory: httpResourceFactory,
-	//	}
-	ResourceConfig struct {
-		Scheme  []string        // URL schemes this config handles (e.g., "http", "postgres")
-		Factory ResourceFactory // Factory function to create resource instances
-	}
-
-	// Resource defines the interface that all resource types must implement.
-	// The Test method should verify that the resource is available and ready,
-	// returning an error if the resource is not accessible or not ready.
-	//
-	// Implementations should be context-aware and respect cancellation signals.
-	Resource interface {
-		// Test verifies that the resource is available and ready for use.
-		// Should return nil if the resource is ready, or an error describing
-		// why the resource is not available.
-		Test(ctx context.Context) error
-	}
-
-	// Registry manages the mapping between URL schemes and their corresponding
-	// resource factories. It provides methods to register new resource types
-	// and resolve URLs to resource instances.
-	Registry struct {
-		resources map[string]ResourceFactory
-	}
-)
-
-// newRegistry creates a new Registry instance and populates it with the provided
-// resource configurations. Each configuration maps one or more URL schemes to
-// their corresponding factory functions.
-func newRegistry(configs []ResourceConfig) *Registry {
-	resources := make(map[string]ResourceFactory)
-
-	for _, c := range configs {
-		for _, s := range c.Scheme {
-			resources[s] = c.Factory
-		}
-	}
-
-	return &Registry{resources}
+// Registry supports concurrent registration and inspection during setup. The
+// runner freezes registration on its first valid wait. Resolve and List remain
+// available after freezing. A Registry must not be copied after first use.
+type Registry struct {
+	mu        sync.RWMutex
+	resources map[string]ResourceFactory
+	frozen    bool
 }
 
-// Register adds a resource factory to the registry for the specified URL scheme.
-// The scheme is automatically trimmed of whitespace. Returns an error if a
-// factory is already registered for the given scheme.
-//
-// Example:
-//
-//	err := registry.Register("custom", myResourceFactory)
-//	if err != nil {
-//		// Handle registration conflict
-//	}
-func (r *Registry) Register(scheme string, factory ResourceFactory) error {
-	scheme = strings.TrimSpace(scheme)
-	_, exists := r.resources[scheme]
+func newRegistry(configs []ResourceConfig) (*Registry, error) {
+	r := &Registry{}
+	for _, config := range configs {
+		if len(config.Scheme) == 0 {
+			return nil, fmt.Errorf("%w: resource config must contain a scheme", ErrInvalidArgument)
+		}
+		for _, scheme := range config.Scheme {
+			if err := r.Register(scheme, config.Factory); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return r, nil
+}
 
-	if exists {
+// Register adds a factory during setup. Schemes are trimmed and lowercased.
+// Invalid schemes or nil factories return ErrInvalidArgument; duplicates return
+// ErrResourceAlreadyRegistered. Once frozen, all registrations return
+// ErrRegistryFrozen. Failed registrations leave the registry unchanged.
+func (r *Registry) Register(scheme string, factory ResourceFactory) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.frozen {
+		return ErrRegistryFrozen
+	}
+
+	scheme = strings.ToLower(strings.TrimSpace(scheme))
+	if !validScheme(scheme) {
+		return fmt.Errorf("%w: invalid resource scheme %q", ErrInvalidArgument, scheme)
+	}
+
+	if factory == nil {
+		return fmt.Errorf("%w: nil factory for %s", ErrInvalidArgument, scheme)
+	}
+
+	if _, exists := r.resources[scheme]; exists {
 		return fmt.Errorf("%w: %s", ErrResourceAlreadyRegistered, scheme)
+	}
+
+	if r.resources == nil {
+		r.resources = make(map[string]ResourceFactory)
 	}
 
 	r.resources[scheme] = factory
@@ -92,42 +65,38 @@ func (r *Registry) Register(scheme string, factory ResourceFactory) error {
 	return nil
 }
 
-// Resolve parses the location URL and creates a Resource instance using the
-// appropriate factory for the URL's scheme. Returns an error if the URL
-// cannot be parsed or if no factory is registered for the scheme.
-//
-// Example:
-//
-//	resource, err := registry.Resolve("postgres://user:pass@localhost:5432/db")
-//	if err != nil {
-//		// Handle resolution error
-//	}
-//	err = resource.Test(ctx)
+// Resolve creates a resource without freezing the registry. The selected factory
+// runs outside the registry lock. URL parsing and factory errors are preserved.
 func (r *Registry) Resolve(location string) (Resource, error) {
-	u, err := url.Parse(location)
+	return resolveResource(location, func(scheme string) ResourceFactory {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
 
-	if err != nil {
-		return nil, err
-	}
-
-	rf, found := r.resources[u.Scheme]
-
-	if !found {
-		return nil, fmt.Errorf("%w: %s", ErrResourceNotFound, u.Scheme)
-	}
-
-	return rf(u)
+		return r.resources[scheme]
+	})
 }
 
-// List returns a slice containing all registered URL schemes.
-// The order of schemes in the returned slice is not guaranteed.
-// This can be useful for debugging or displaying available resource types.
+// List returns an independent, sorted slice of registered schemes.
 func (r *Registry) List() []string {
-	list := make([]string, 0, len(r.resources))
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
-	for k := range r.resources {
-		list = append(list, k)
+	list := make([]string, 0, len(r.resources))
+	for scheme := range r.resources {
+		list = append(list, scheme)
 	}
 
+	sort.Strings(list)
+
 	return list
+}
+
+// freeze returns the now-immutable mapping for lock-free waiting reads.
+func (r *Registry) freeze() map[string]ResourceFactory {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.frozen = true
+
+	return r.resources
 }
