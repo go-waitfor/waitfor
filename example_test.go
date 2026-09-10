@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/go-waitfor/waitfor"
+	"github.com/go-waitfor/waitfor/v2"
 )
 
 func ExampleRunner_Check() {

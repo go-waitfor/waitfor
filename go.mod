@@ -1,4 +1,4 @@
-module github.com/go-waitfor/waitfor
+module github.com/go-waitfor/waitfor/v2
 
 go 1.25
 

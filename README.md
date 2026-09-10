@@ -1,7 +1,7 @@
 # waitfor
 
 [![Build Status](https://github.com/go-waitfor/waitfor/workflows/Build/badge.svg)](https://github.com/go-waitfor/waitfor/actions)
-[![Go Reference](https://pkg.go.dev/badge/github.com/go-waitfor/waitfor.svg)](https://pkg.go.dev/github.com/go-waitfor/waitfor)
+[![Go Reference](https://pkg.go.dev/badge/github.com/go-waitfor/waitfor/v2.svg)](https://pkg.go.dev/github.com/go-waitfor/waitfor/v2)
 
 Wait for resources concurrently before proceeding or starting a command. The core
 provides retry limits, duration-based exponential delays, inspectable errors,
@@ -11,9 +11,11 @@ dependency. Resource integrations live in separate packages.
 ## Installation
 
 ```sh
-go get github.com/go-waitfor/waitfor
-go get github.com/go-waitfor/waitfor-http
+go get github.com/go-waitfor/waitfor/v2
 ```
+
+Existing v1 consumers keep the `github.com/go-waitfor/waitfor` import path and
+their v1 release dependency. Adopting v2 requires an explicit import-path change.
 
 Existing integrations include [HTTP](https://github.com/go-waitfor/waitfor-http),
 [files](https://github.com/go-waitfor/waitfor-fs),
@@ -21,9 +23,15 @@ Existing integrations include [HTTP](https://github.com/go-waitfor/waitfor-http)
 [PostgreSQL](https://github.com/go-waitfor/waitfor-postgres),
 [MySQL](https://github.com/go-waitfor/waitfor-mysql), and
 [MongoDB](https://github.com/go-waitfor/waitfor-mongodb).
-Their package-level `Use()` helpers return a `waitfor.ResourceConfig`.
+Integration releases whose `Use()` helpers return a v1 `ResourceConfig` cannot
+pass those configurations directly to v2 `New`. They must migrate their core
+imports and factories to `github.com/go-waitfor/waitfor/v2` before use with v2.
+Integration and CLI migrations are separate from this core module change.
 
 ## Quick start
+
+This self-contained example uses an always-ready custom resource. Replace the
+function body with your context-aware readiness check.
 
 ```go
 package main
@@ -31,14 +39,21 @@ package main
 import (
     "context"
     "fmt"
+    "net/url"
     "time"
 
-    "github.com/go-waitfor/waitfor"
-    http "github.com/go-waitfor/waitfor-http"
+    "github.com/go-waitfor/waitfor/v2"
 )
 
 func main() {
-    runner, err := waitfor.New(http.Use())
+    runner, err := waitfor.New(waitfor.ResourceConfig{
+        Scheme: []string{"ready"},
+        Factory: func(*url.URL) (waitfor.Resource, error) {
+            return waitfor.ResourceFunc(func(context.Context) error {
+                return nil
+            }), nil
+        },
+    })
     if err != nil {
         fmt.Println(err)
         return
@@ -46,7 +61,7 @@ func main() {
 
     err = runner.Test(
         context.Background(),
-        []string{"http://localhost:8080/health", "https://api.example.com/ready"},
+        []string{"ready://a", "ready://b"},
         waitfor.WithAttempts(0),
         waitfor.WithInterval(500*time.Millisecond),
         waitfor.WithMaxInterval(5*time.Second),
@@ -254,7 +269,7 @@ also support concurrent tests. A registry must not be copied after first use.
 output, err := runner.Run(ctx, waitfor.Program{
     Executable: "myapp",
     Args:       []string{"--config", "app.yaml"},
-    Resources:  []string{"http://localhost:8080/health"},
+    Resources:  []string{"ready://a"},
 }, waitfor.WithMaxElapsedTime(30*time.Second))
 ```
 
@@ -267,6 +282,12 @@ waiting only, so use a caller deadline to bound command execution too.
 
 ## Breaking changes and migration
 
+- V1 uses `github.com/go-waitfor/waitfor`; v2 uses
+  `github.com/go-waitfor/waitfor/v2`. Existing v1 release tags retain the v1 API.
+  To upgrade after publication, run `go get github.com/go-waitfor/waitfor/v2`,
+  update every core import to `/v2`, and apply the API changes below. The package
+  name remains `waitfor`; source stays at the repository root and the intended
+  first stable release tag is `v2.0.0`.
 - Handle both return values from `New`: `runner, err := waitfor.New(...)`.
   Duplicate configurations now fail instead of silently overwriting factories.
 - Replace integer-second options with explicit durations:
@@ -279,8 +300,10 @@ waiting only, so use a caller deadline to bound command execution too.
 - Move registration before the first wait. Runtime registration after that point
   returns `ErrRegistryFrozen`.
 - Replace core `Module` and `waitfor.Use(module)` with a direct `ResourceConfig`.
-  Resource-package helpers such as `http.Use()` that already return configs remain
-  usable. The `ResourceConfig.Scheme` field and `Resource` interface are unchanged.
+  Resource-package helpers such as `http.Use()` must return v2 configurations;
+  helpers returning v1 configurations are incompatible with v2 `New`.
+  The `ResourceConfig.Scheme` field and `Resource` interface shape are unchanged,
+  but the module paths give v1 and v2 their own type identities.
 - Replace string matching on wait errors with `errors.Is`/`errors.As`. Error text
   now identifies resources in input order, and cancellation preserves error chains.
 - Retry interval, multiplier, and jitter settings now take effect. Unlimited
@@ -289,7 +312,7 @@ waiting only, so use a caller deadline to bound command execution too.
 
 ## Development
 
-The Go compatibility floor and the pinned backoff dependency remain unchanged.
+Development requires Go 1.25 or later.
 
 ```sh
 go test ./...
