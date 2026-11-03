@@ -114,17 +114,23 @@ interval grows exponentially; jitter varies it by the configured factor above or
 below the base, and the resulting delay is capped at the maximum interval.
 Every resource has independent backoff state.
 
-Options are applied in order, with the last setter winning. One validation pass
-runs before registry freezing or resource work. Intervals must be positive, the
-maximum must be at least the initial interval, the multiplier must be finite and
-at least one, jitter must be finite and within `[0, 1]`, and elapsed limits must
-not be negative. Attempt limits must fit in `int`; timing values whose jitter
-calculation could overflow `time.Duration` are rejected. A nil `Option` is invalid;
-a nil observer disables observation.
+Options are applied in order, with the last valid setter winning. Each supplied
+value is validated when applied, so an invalid value remains an error even if a
+later option replaces it. Relationships between final values are checked after
+successful application, before registry freezing or resource work.
+
+Intervals must be positive, the maximum must be at least the initial interval,
+the multiplier must be finite and at least one, jitter must be finite and within
+`[0, 1]`, and elapsed limits must not be negative. Attempt limits must fit in
+`int`; timing values whose jitter calculation could overflow `time.Duration`
+are rejected. Nil options are ignored; a nil observer disables observation.
 
 Invalid options return an error wrapping `ErrInvalidOption`, without `ErrWait`.
-They are never retried. No backoff-library types are required in the public API,
-and backoff-specific error types receive no special handling.
+Independent validation failures are joined, and named validation errors from
+`github.com/ziflex/go-options` remain inspectable with `errors.As`. Invalid
+options are never retried.
+No backoff-library types are required in the public API, and backoff-specific
+error types receive no special handling.
 
 ## Results and errors
 

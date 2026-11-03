@@ -1,24 +1,55 @@
 package waitfor
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"time"
+
+	goopt "github.com/ziflex/go-options"
 )
 
-type options struct {
-	interval            time.Duration
-	maxInterval         time.Duration
-	maxElapsedTime      time.Duration
-	attempts            uint64
-	multiplier          float64
-	randomizationFactor float64
-	observer            Observer
-}
+type (
+	options struct {
+		interval            time.Duration
+		maxInterval         time.Duration
+		maxElapsedTime      time.Duration
+		attempts            uint64
+		multiplier          float64
+		randomizationFactor float64
+		observer            Observer
+	}
 
-// Option configures a wait. Final values are validated together by Check, Test,
-// or Run before any resource work. When repeated, the last setter wins.
-type Option func(opts *options)
+	// Option configures a wait. Each supplied value is validated when applied,
+	// even if a later option replaces it. Valid setters apply in order, with the
+	// last winning. Nil options are ignored. Relationships between final values
+	// are checked before Check, Test, or Run performs any resource work.
+	Option = goopt.Option[options]
+)
+
+var validateOptionRelationships = goopt.Check(func(o options) error {
+	var errs []error
+
+	if o.maxInterval < o.interval {
+		errs = append(errs, goopt.ValidationError{
+			Field:  "max interval",
+			Value:  o.maxInterval.String(),
+			Reason: errors.New("must be at least interval"),
+		})
+	}
+
+	if o.randomizationFactor > 0 && float64(o.maxInterval)*(1+o.randomizationFactor)+1 >= float64(math.MaxInt64) {
+		// The delay generator randomizes before we cap the actual delay. Reject
+		// values that could overflow its float-to-duration conversion first.
+		errs = append(errs, goopt.ValidationError{
+			Field:  "max interval",
+			Value:  o.maxInterval.String(),
+			Reason: errors.New("jitter calculation overflows time.Duration"),
+		})
+	}
+
+	return errors.Join(errs...)
+})
 
 func newOptions(setters []Option) (options, error) {
 	opts := options{
@@ -29,55 +60,36 @@ func newOptions(setters []Option) (options, error) {
 		randomizationFactor: 0.5,
 	}
 
-	for _, setter := range setters {
-		if setter == nil {
-			return options{}, fmt.Errorf("%w: nil option", ErrInvalidOption)
-		}
-		setter(&opts)
+	opts, err := goopt.ApplyTo(opts, setters...)
+	if err == nil {
+		err = validateOptionRelationships(opts)
 	}
 
-	if err := opts.validate(); err != nil {
-		return options{}, err
+	if err != nil {
+		return options{}, fmt.Errorf("%w: %w", ErrInvalidOption, err)
 	}
 
 	return opts, nil
 }
 
-func (o options) validate() error {
-	switch {
-	case o.interval <= 0:
-		return fmt.Errorf("%w: interval must be positive", ErrInvalidOption)
-	case o.maxInterval <= 0:
-		return fmt.Errorf("%w: max interval must be positive", ErrInvalidOption)
-	case o.maxInterval < o.interval:
-		return fmt.Errorf("%w: max interval must be at least interval", ErrInvalidOption)
-	case math.IsNaN(o.multiplier) || math.IsInf(o.multiplier, 0) || o.multiplier < 1:
-		return fmt.Errorf("%w: multiplier must be finite and at least 1", ErrInvalidOption)
-	case math.IsNaN(o.randomizationFactor) || math.IsInf(o.randomizationFactor, 0) || o.randomizationFactor < 0 || o.randomizationFactor > 1:
-		return fmt.Errorf("%w: randomization factor must be finite and between 0 and 1", ErrInvalidOption)
-	case o.maxElapsedTime < 0:
-		return fmt.Errorf("%w: max elapsed time must not be negative", ErrInvalidOption)
-	case o.attempts > uint64(^uint(0)>>1):
-		return fmt.Errorf("%w: attempts must fit in an int", ErrInvalidOption)
-	case o.randomizationFactor > 0 && float64(o.maxInterval)*(1+o.randomizationFactor)+1 >= float64(math.MaxInt64):
-		// The delay generator randomizes before we cap the actual delay. Reject
-		// values that could overflow its float-to-duration conversion first.
-		return fmt.Errorf("%w: max interval with jitter overflows time.Duration", ErrInvalidOption)
-	}
-
-	return nil
-}
-
 // WithInterval sets the initial retry interval. It must be positive; the default
 // is 5 seconds. Durations are used directly, e.g. 500*time.Millisecond.
 func WithInterval(interval time.Duration) Option {
-	return func(opts *options) { opts.interval = interval }
+	return goopt.New(func(opts *options, input time.Duration) { opts.interval = input }).
+		Value(interval).
+		Named("interval").
+		Validators(goopt.Positive[time.Duration]()).
+		Build()
 }
 
 // WithMaxInterval caps the actual retry delay, including jitter. It must be
 // positive and at least the initial interval; the default is 60 seconds.
 func WithMaxInterval(interval time.Duration) Option {
-	return func(opts *options) { opts.maxInterval = interval }
+	return goopt.New(func(opts *options, input time.Duration) { opts.maxInterval = input }).
+		Value(interval).
+		Named("max interval").
+		Validators(goopt.Positive[time.Duration]()).
+		Build()
 }
 
 // WithAttempts limits the total Resource.Test calls per resource, including the
@@ -85,7 +97,11 @@ func WithMaxInterval(interval time.Duration) Option {
 // success, caller cancellation, or an explicitly configured elapsed-time limit.
 // A nonzero limit must fit in an int, as used by Result.Attempts.
 func WithAttempts(attempts uint64) Option {
-	return func(opts *options) { opts.attempts = attempts }
+	return goopt.New(func(opts *options, input uint64) { opts.attempts = input }).
+		Value(attempts).
+		Named("attempts").
+		Validators(goopt.Max(uint64(^uint(0) >> 1))).
+		Build()
 }
 
 // WithMaxElapsedTime sets one deadline shared by all resources in a wait. Zero
@@ -93,20 +109,32 @@ func WithAttempts(attempts uint64) Option {
 // caller deadline wins. Expiration cancels context-aware attempts and is
 // inspectable as context.DeadlineExceeded. This option does not limit a Program.
 func WithMaxElapsedTime(limit time.Duration) Option {
-	return func(opts *options) { opts.maxElapsedTime = limit }
+	return goopt.New(func(opts *options, input time.Duration) { opts.maxElapsedTime = input }).
+		Value(limit).
+		Named("max elapsed time").
+		Validators(goopt.NonNegative[time.Duration]()).
+		Build()
 }
 
 // WithMultiplier sets exponential growth between retries. It must be finite and
 // at least 1; 1 gives a constant base interval. The default is 1.5.
 func WithMultiplier(multiplier float64) Option {
-	return func(opts *options) { opts.multiplier = multiplier }
+	return goopt.New(func(opts *options, input float64) { opts.multiplier = input }).
+		Value(multiplier).
+		Named("multiplier").
+		Validators(goopt.Between[float64](1, math.MaxFloat64)).
+		Build()
 }
 
 // WithRandomizationFactor sets jitter in the range [0, 1]. The default is 0.5;
 // zero disables jitter. Actual delays remain capped by WithMaxInterval. Timing
 // values whose jitter calculation could overflow time.Duration are invalid.
 func WithRandomizationFactor(factor float64) Option {
-	return func(opts *options) { opts.randomizationFactor = factor }
+	return goopt.New(func(opts *options, input float64) { opts.randomizationFactor = input }).
+		Value(factor).
+		Named("randomization factor").
+		Validators(goopt.Between[float64](0, 1)).
+		Build()
 }
 
 // WithAttemptObserver observes failed attempts when another retry is planned.
@@ -116,5 +144,8 @@ func WithRandomizationFactor(factor float64) Option {
 // retry may still be canceled before execution. Callers sharing callback state
 // across separate concurrent waits must synchronize that state. Nil disables it.
 func WithAttemptObserver(fn func(Attempt)) Option {
-	return func(opts *options) { opts.observer = fn }
+	return goopt.New(func(opts *options, input func(Attempt)) { opts.observer = input }).
+		Value(fn).
+		Named("attempt observer").
+		Build()
 }
