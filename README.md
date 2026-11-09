@@ -1,425 +1,37 @@
 # waitfor
 
 [![Build Status](https://github.com/go-waitfor/waitfor/workflows/Build/badge.svg)](https://github.com/go-waitfor/waitfor/actions)
-[![Go Report Card](https://goreportcard.com/badge/github.com/go-waitfor/waitfor)](https://goreportcard.com/report/github.com/go-waitfor/waitfor)
-[![GoDoc](https://godoc.org/github.com/go-waitfor/waitfor?status.svg)](https://godoc.org/github.com/go-waitfor/waitfor)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/go-waitfor/waitfor)](https://github.com/go-waitfor/waitfor)
+[![Go Reference](https://pkg.go.dev/badge/github.com/go-waitfor/waitfor/v2.svg)](https://pkg.go.dev/github.com/go-waitfor/waitfor/v2)
 
-> Test and wait on the availability of remote resources before proceeding with your application logic.
-
-`waitfor` is a Go library that provides a robust way to test and wait for remote resource availability with built-in retry logic, exponential backoff, and extensible resource support. It's particularly useful for ensuring dependencies are ready before starting applications or running critical operations.
-
-## Table of Contents
-
-- [Features](#features)
-- [Installation](#installation)
-- [Supported Resources](#supported-resources)
-- [Resource URLs](#resource-urls)
-- [Quick Start](#quick-start)
-  - [Test Resource Availability](#test-resource-availability)
-  - [Test and Run Program](#test-and-run-program)
-  - [Custom Resource Types](#custom-resource-types)
-- [API Reference](#api-reference)
-  - [Core Types](#core-types)
-  - [Functions](#functions)
-  - [Configuration Options](#configuration-options)
-- [Advanced Usage](#advanced-usage)
-- [Error Handling](#error-handling)
-- [Best Practices](#best-practices)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
-- [License](#license)
-
-## Features
-
-- **Parallel Testing**: Test multiple resources concurrently for faster startup times
-- **Exponential Backoff**: Smart retry logic that prevents overwhelming resources
-- **Extensible Architecture**: Support for custom resource types through a plugin system
-- **Context Support**: Full context support for cancellation and timeouts
-- **Zero Dependencies**: Minimal external dependencies for easy integration
-- **Production Ready**: Battle-tested retry logic with configurable parameters
+Wait for resources concurrently before proceeding or starting a command. The core
+provides retry limits, duration-based exponential delays, inspectable errors,
+per-resource results, and an optional observer. It has no logging or telemetry
+dependency. Resource integrations live in separate packages.
 
 ## Installation
 
-Install `waitfor` using Go modules:
-
-```bash
-go get github.com/go-waitfor/waitfor
+```sh
+go get github.com/go-waitfor/waitfor/v2
 ```
 
-For specific resource types, install the corresponding packages:
-
-```bash
-# Database resources
-go get github.com/go-waitfor/waitfor-postgres
-go get github.com/go-waitfor/waitfor-mysql
-
-# File system and process resources  
-go get github.com/go-waitfor/waitfor-fs
-go get github.com/go-waitfor/waitfor-proc
-
-# HTTP resources
-go get github.com/go-waitfor/waitfor-http
-
-# NoSQL databases
-go get github.com/go-waitfor/waitfor-mongodb
-```
-
-## Supported Resources
-
-The following resource types are available through separate packages:
-
-| Resource Type | Package | URL Schemes | Description |
-|---------------|---------|-------------|-------------|
-| [File System](https://github.com/go-waitfor/waitfor-fs) | `waitfor-fs` | `file://` | Test file/directory existence |
-| [OS Process](https://github.com/go-waitfor/waitfor-proc) | `waitfor-proc` | `proc://` | Test process availability |
-| [HTTP(S) Endpoint](https://github.com/go-waitfor/waitfor-http) | `waitfor-http` | `http://`, `https://` | Test HTTP endpoint availability |
-| [PostgreSQL](https://github.com/go-waitfor/waitfor-postgres) | `waitfor-postgres` | `postgres://` | Test PostgreSQL database connectivity |
-| [MySQL/MariaDB](https://github.com/go-waitfor/waitfor-mysql) | `waitfor-mysql` | `mysql://`, `mariadb://` | Test MySQL/MariaDB connectivity |
-| [MongoDB](https://github.com/go-waitfor/waitfor-mongodb) | `waitfor-mongodb` | `mongodb://` | Test MongoDB connectivity |
-
-## Resource URLs
-
-Resource locations are specified using standard URL format with scheme-specific parameters:
-
-**Format**: `scheme://[user[:password]@]host[:port][/path][?query]`
-
-**Examples**:
-- `file://./myfile` - Local file path
-- `file:///absolute/path/to/file` - Absolute file path
-- `http://localhost:8080/health` - HTTP health check endpoint
-- `https://api.example.com/status` - HTTPS endpoint with path
-- `postgres://user:password@localhost:5432/mydb` - PostgreSQL database
-- `mysql://user:password@localhost:3306/mydb` - MySQL database
-- `mongodb://localhost:27017/mydb` - MongoDB database
-- `proc://nginx` - Process by name
-
-## Quick Start
-
-### Test Resource Availability
-
-Use `waitfor` to test if resources are available before proceeding:
-
-```go
-package main
-
-import (
-	"context"
-	"fmt"
-	"github.com/go-waitfor/waitfor"
-	"github.com/go-waitfor/waitfor-postgres"
-	"os"
-)
-
-func main() {
-	runner := waitfor.New(postgres.Use())
-
-	err := runner.Test(
-		context.Background(),
-		[]string{"postgres://locahost:5432/mydb?user=user&password=test"},
-		waitfor.WithAttempts(5),
-	)
-
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
-}
-```
-
-
-### Test and Run Program
-
-`waitfor` can ensure dependencies are ready before executing external commands, making it perfect for application startup scripts and deployment scenarios:
-
-```go
-package main
-
-import (
-	"context"
-	"fmt"
-	"github.com/go-waitfor/waitfor"
-	"github.com/go-waitfor/waitfor-postgres"
-	"os"
-)
-
-func main() {
-	runner := waitfor.New(postgres.Use())
-
-	program := waitfor.Program{
-		Executable: "myapp",
-		Args:       []string{"--database", "postgres://locahost:5432/mydb?user=user&password=test"},
-		Resources:  []string{"postgres://locahost:5432/mydb?user=user&password=test"},
-	}
-
-	out, err := runner.Run(
-		context.Background(),
-		program,
-		waitfor.WithAttempts(5),
-	)
-
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
-
-	fmt.Println(string(out))
-}
-```
-
-### Custom Resource Types
-
-`waitfor` supports custom resource types through its extensible registry system. You can register your own resource checkers:
-
-```go
-package main
-
-import (
-	"context"
-	"database/sql"
-	"fmt"
-	_ "github.com/lib/pq"
-	"github.com/go-waitfor/waitfor"
-	"net/url"
-	"os"
-	"strings"
-)
-
-const PostgresScheme = "postgres"
-
-type PostgresResource struct {
-	url *url.URL
-}
-
-func (p *PostgresResource) Test(ctx context.Context) error {
-	db, err := sql.Open(p.url.Scheme, strings.TrimPrefix(p.url.String(), PostgresScheme+"://"))
-
-	if err != nil {
-		return err
-	}
-
-	defer db.Close()
-
-	return db.PingContext(ctx)
-}
-
-func main() {
-	runner := waitfor.New(waitfor.ResourceConfig{
-		Scheme: []string{PostgresScheme},
-		Factory: func(u *url.URL) (waitfor.Resource, error) {
-			return &PostgresResource{u}, nil
-		},
-	})
-
-	err := runner.Test(
-		context.Background(),
-		[]string{"postgres://locahost:5432/mydb?user=user&password=test"},
-		waitfor.WithAttempts(5),
-	)
-
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
-}
-```
-
-## API Reference
-
-### Core Types
-
-#### Runner
-
-The main entry point for testing resources and running programs.
-
-```go
-type Runner struct {
-    // registry contains all registered resource factories
-}
-```
-
-#### Program
-
-Defines an external command with its dependencies.
-
-```go
-type Program struct {
-    Executable string   // Command to execute
-    Args       []string // Command arguments
-    Resources  []string // Dependencies to test before execution
-}
-```
-
-#### Resource
-
-Interface that all resource types must implement.
-
-```go
-type Resource interface {
-    Test(ctx context.Context) error
-}
-```
-
-#### ResourceConfig
-
-Configuration for registering resource types.
-
-```go
-type ResourceConfig struct {
-    Scheme  []string        // URL schemes this resource handles
-    Factory ResourceFactory // Factory function to create resource instances
-}
-```
-
-#### ResourceFactory
-
-Function signature for creating resource instances.
-
-```go
-type ResourceFactory func(u *url.URL) (Resource, error)
-```
-
-### Functions
-
-#### New
-
-Creates a new Runner with the specified resource configurations.
-
-```go
-func New(configurators ...ResourceConfig) *Runner
-```
-
-**Parameters:**
-- `configurators`: Variable number of ResourceConfig instances to register
-
-**Returns:** A new Runner instance
-
-**Example:**
-```go
-runner := waitfor.New(postgres.Use(), http.Use())
-```
-
-#### (*Runner) Test
-
-Tests the availability of specified resources.
-
-```go
-func (r *Runner) Test(ctx context.Context, resources []string, setters ...Option) error
-```
-
-**Parameters:**
-- `ctx`: Context for cancellation and timeout control
-- `resources`: Slice of resource URLs to test
-- `setters`: Configuration options (WithAttempts, WithInterval, etc.)
-
-**Returns:** Error if any resource is unavailable after all retry attempts
-
-#### (*Runner) Run
-
-Tests resources and executes a program if all resources are available.
-
-```go
-func (r *Runner) Run(ctx context.Context, program Program, setters ...Option) ([]byte, error)
-```
-
-**Parameters:**
-- `ctx`: Context for cancellation and timeout control
-- `program`: Program configuration with executable, args, and resource dependencies
-- `setters`: Configuration options
-
-**Returns:** Combined stdout/stderr output and error
-
-#### (*Runner) Resources
-
-Returns the resource registry for advanced usage.
-
-```go
-func (r *Runner) Resources() *Registry
-```
-
-**Returns:** The internal Registry instance
-
-#### Use
-
-Helper function to convert module functions to ResourceConfig.
-
-```go
-func Use(mod Module) ResourceConfig
-```
-
-**Parameters:**
-- `mod`: Module function that returns schemes and factory
-
-**Returns:** ResourceConfig ready for use with New()
-
-### Configuration Options
-
-All test and run operations accept configuration options to customize behavior:
-
-#### WithAttempts
-
-Sets the maximum number of retry attempts.
-
-```go
-func WithAttempts(attempts uint64) Option
-```
-
-**Default:** 5 attempts
-
-**Example:**
-```go
-err := runner.Test(ctx, resources, waitfor.WithAttempts(10))
-```
-
-#### WithInterval
-
-Sets the initial retry interval in seconds.
-
-```go
-func WithInterval(interval uint64) Option
-```
-
-**Default:** 5 seconds
-
-**Example:**
-```go
-err := runner.Test(ctx, resources, waitfor.WithInterval(2))
-```
-
-#### WithMaxInterval
-
-Sets the maximum retry interval for exponential backoff in seconds.
-
-```go
-func WithMaxInterval(interval uint64) Option
-```
-
-**Default:** 60 seconds
-
-**Example:**
-```go
-err := runner.Test(ctx, resources, waitfor.WithMaxInterval(120))
-```
-
-#### Combining Options
-
-Options can be combined for fine-tuned control:
-
-```go
-err := runner.Test(
-    ctx, 
-    resources,
-    waitfor.WithAttempts(15),
-    waitfor.WithInterval(1),
-    waitfor.WithMaxInterval(30),
-)
-```
-
-## Advanced Usage
-
-### Multiple Resource Types
-
-Test different types of resources simultaneously:
+Existing v1 consumers keep the `github.com/go-waitfor/waitfor` import path and
+their v1 release dependency. Adopting v2 requires an explicit import-path change.
+
+Existing integrations include [HTTP](https://github.com/go-waitfor/waitfor-http),
+[files](https://github.com/go-waitfor/waitfor-fs),
+[processes](https://github.com/go-waitfor/waitfor-proc),
+[PostgreSQL](https://github.com/go-waitfor/waitfor-postgres),
+[MySQL](https://github.com/go-waitfor/waitfor-mysql), and
+[MongoDB](https://github.com/go-waitfor/waitfor-mongodb).
+Integration releases whose `Use()` helpers return a v1 `ResourceConfig` cannot
+pass those configurations directly to v2 `New`. They must migrate their core
+imports and factories to `github.com/go-waitfor/waitfor/v2` before use with v2.
+Integration and CLI migrations are separate from this core module change.
+
+## Quick start
+
+This self-contained example uses an always-ready custom resource. Replace the
+function body with your context-aware readiness check.
 
 ```go
 package main
@@ -427,363 +39,329 @@ package main
 import (
     "context"
     "fmt"
-    "github.com/go-waitfor/waitfor"
-    "github.com/go-waitfor/waitfor-postgres"
-    "github.com/go-waitfor/waitfor-http"
-    "github.com/go-waitfor/waitfor-fs"
-)
-
-func main() {
-    runner := waitfor.New(
-        postgres.Use(),
-        http.Use(),
-        fs.Use(),
-    )
-    
-    resources := []string{
-        "postgres://user:pass@localhost:5432/mydb",
-        "http://localhost:8080/health",
-        "file://./config.json",
-    }
-    
-    err := runner.Test(context.Background(), resources)
-    if err != nil {
-        fmt.Printf("Dependencies not ready: %v\n", err)
-        return
-    }
-    
-    fmt.Println("All dependencies are ready!")
-}
-```
-
-### Context Cancellation and Timeouts
-
-Use context for timeout control and cancellation:
-
-```go
-package main
-
-import (
-    "context"
-    "time"
-    "github.com/go-waitfor/waitfor"
-    "github.com/go-waitfor/waitfor-postgres"
-)
-
-func main() {
-    runner := waitfor.New(postgres.Use())
-    
-    // Set a 30-second timeout
-    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-    defer cancel()
-    
-    err := runner.Test(
-        ctx,
-        []string{"postgres://localhost:5432/mydb"},
-        waitfor.WithAttempts(10),
-    )
-    
-    if err != nil {
-        if ctx.Err() == context.DeadlineExceeded {
-            fmt.Println("Timeout waiting for resources")
-        } else {
-            fmt.Printf("Resource test failed: %v\n", err)
-        }
-        return
-    }
-    
-    fmt.Println("Resources are ready!")
-}
-```
-
-### Dynamic Resource Registration
-
-Register resources at runtime:
-
-```go
-package main
-
-import (
-    "context"
     "net/url"
-    "github.com/go-waitfor/waitfor"
+    "time"
+
+    "github.com/go-waitfor/waitfor/v2"
 )
 
 func main() {
-    runner := waitfor.New()
-    
-    // Register a custom resource type
-    err := runner.Resources().Register("custom", func(u *url.URL) (waitfor.Resource, error) {
-        return &MyCustomResource{url: u}, nil
+    runner, err := waitfor.New(waitfor.ResourceConfig{
+        Scheme: []string{"ready"},
+        Factory: func(*url.URL) (waitfor.Resource, error) {
+            return waitfor.ResourceFunc(func(context.Context) error {
+                return nil
+            }), nil
+        },
     })
-    
     if err != nil {
-        panic(err)
+        fmt.Println(err)
+        return
     }
-    
-    // Now you can use the custom resource
-    err = runner.Test(context.Background(), []string{"custom://example.com"})
-    // ... handle error
-}
-```
 
-## Error Handling
-
-`waitfor` provides specific error types for different failure scenarios:
-
-### Error Types
-
-- `ErrWait`: Returned when resources are not available after all retry attempts
-- `ErrInvalidArgument`: Returned for invalid input parameters
-- `ErrResourceNotFound`: Returned when a resource type is not registered
-- `ErrResourceAlreadyRegistered`: Returned when trying to register a resource type that already exists
-
-### Error Handling Patterns
-
-```go
-err := runner.Test(ctx, resources)
-if err != nil {
-    // Check if it's a waitfor-specific error
-    if strings.Contains(err.Error(), waitfor.ErrWait.Error()) {
-        fmt.Println("Resources are not available after retries")
-        // Maybe wait longer or use different configuration
-    } else {
-        fmt.Printf("Configuration or setup error: %v\n", err)
-    }
-    return
-}
-```
-
-### Timeout vs Resource Failure
-
-```go
-ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
-defer cancel()
-
-err := runner.Test(ctx, resources)
-if err != nil {
-    if ctx.Err() == context.DeadlineExceeded {
-        fmt.Println("Overall timeout exceeded")
-    } else {
-        fmt.Println("Resource-specific failure:", err)
-    }
-}
-```
-
-## Best Practices
-
-### 1. Choose Appropriate Timeouts
-
-Set timeouts based on your application's requirements:
-
-```go
-// For quick startup (development)
-ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-
-// For production startup
-ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-```
-
-### 2. Configure Retry Behavior
-
-Adjust retry parameters based on resource characteristics:
-
-```go
-// For fast resources (local files, processes)
-waitfor.WithAttempts(3),
-waitfor.WithInterval(1),
-waitfor.WithMaxInterval(5)
-
-// For slow resources (remote databases, external APIs)
-waitfor.WithAttempts(15),
-waitfor.WithInterval(5),
-waitfor.WithMaxInterval(60)
-```
-
-### 3. Group Related Resources
-
-Test related resources together for better error reporting:
-
-```go
-// Test database cluster
-databaseResources := []string{
-    "postgres://localhost:5432/primary",
-    "postgres://localhost:5433/replica1", 
-    "postgres://localhost:5434/replica2",
-}
-
-// Test web services
-webResources := []string{
-    "http://localhost:8080/health",
-    "http://localhost:8081/ready",
-}
-
-// Test separately for clearer error messages
-if err := runner.Test(ctx, databaseResources); err != nil {
-    log.Fatal("Database cluster not ready:", err)
-}
-
-if err := runner.Test(ctx, webResources); err != nil {
-    log.Fatal("Web services not ready:", err)
-}
-```
-
-### 4. Use Structured Logging
-
-Integrate with structured logging for better observability:
-
-```go
-logger := log.With().Str("component", "waitfor").Logger()
-
-logger.Info().Msg("Starting dependency checks")
-
-err := runner.Test(ctx, resources)
-if err != nil {
-    logger.Error().Err(err).Msg("Dependencies not ready")
-    return
-}
-
-logger.Info().Msg("All dependencies ready")
-```
-
-## Troubleshooting
-
-### Common Issues
-
-#### "resource with a given scheme is not found"
-
-This error occurs when you try to use a resource type that hasn't been registered.
-
-**Solution**: Import and register the appropriate resource package:
-
-```go
-import "github.com/go-waitfor/waitfor-postgres"
-
-runner := waitfor.New(postgres.Use())
-```
-
-#### "failed to wait for resource availability"
-
-This indicates that resources were not available after all retry attempts.
-
-**Solutions**:
-1. Increase retry attempts: `waitfor.WithAttempts(20)`
-2. Increase retry intervals: `waitfor.WithMaxInterval(120)`
-3. Check if the resource URL is correct
-4. Verify the resource is actually running and accessible
-
-#### Connection Refused or Timeout Errors
-
-These are typically network-related issues.
-
-**Solutions**:
-1. Verify the resource is running: `telnet hostname port`
-2. Check firewall rules and network connectivity
-3. Verify DNS resolution for hostnames
-4. Use IP addresses instead of hostnames if DNS is an issue
-
-### Debug Mode
-
-Enable verbose error reporting for troubleshooting:
-
-```go
-err := runner.Test(ctx, resources)
-if err != nil {
-    fmt.Printf("Detailed error: %+v\n", err)
-    
-    // Test each resource individually to isolate issues
-    for _, resource := range resources {
-        if testErr := runner.Test(ctx, []string{resource}); testErr != nil {
-            fmt.Printf("Failed resource: %s - %v\n", resource, testErr)
-        }
-    }
-}
-```
-
-### Performance Considerations
-
-#### Parallel vs Sequential Testing
-
-By default, `waitfor` tests all resources in parallel for faster execution. For resource-constrained environments, consider testing sequentially:
-
-```go
-// Test resources one by one
-for _, resource := range resources {
-    err := runner.Test(ctx, []string{resource})
+    err = runner.Test(
+        context.Background(),
+        []string{"ready://a", "ready://b"},
+        waitfor.WithAttempts(0),
+        waitfor.WithInterval(500*time.Millisecond),
+        waitfor.WithMaxInterval(5*time.Second),
+        waitfor.WithMaxElapsedTime(30*time.Second),
+    )
     if err != nil {
-        return fmt.Errorf("resource %s failed: %w", resource, err)
+        fmt.Println(err)
     }
 }
 ```
 
-#### Memory Usage
+## What ends a wait
 
-When testing many resources, be aware of goroutine overhead. For very large numbers of resources (100+), consider batching:
+Each resource is resolved once and tested as soon as its worker starts. By
+default, all resources can run concurrently. Use `WithMaxConcurrency(n)` to
+process up to `n` resources at a time per wait. Each resource holds its slot
+through resolution, tests, retry delays, and observer calls. With unlimited
+attempts, an unavailable resource can hold its slot until cancellation. Queued
+resources share the wait deadline. If canceled before starting, they report zero attempts.
+
+A resource finishes on success, a resolution error, a permanent probe error,
+attempt exhaustion, or cancellation. Its siblings continue independently. Return
+`waitfor.Permanent(err)` from a probe when retrying cannot help, for example
+after an authentication failure. The marker works through wrapping and preserves
+the original error for `errors.Is` and `errors.As`. `Permanent(nil)` returns nil.
+
+`WithAttempts(0)` permits unlimited attempts. Retryable failures continue
+until success or cancellation by the caller or the configured elapsed limit.
+
+A positive `WithMaxElapsedTime` creates one deadline shared by all resources,
+starting before dispatch. The earlier of this deadline and the caller's deadline
+wins. Attempt and elapsed limits can both be set; the first reached stops that
+resource. Cancellation observed after an attempt takes precedence over its
+success or exhausted attempt limit. A context already canceled at entry performs
+no resource tests.
+
+Cancellation is cooperative. Factories must construct resources promptly.
+`Resource.Test` must honor the supplied context, and observers must return
+promptly. The library waits for those calls to return and does not abandon
+goroutines to enforce deadlines. A valid empty resource list succeeds, including
+with a canceled context.
+
+## Retry options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `WithAttempts(uint64)` | `5` | Total test calls per resource, including the first; `0` is unlimited |
+| `WithMaxConcurrency(int)` | `0` | Maximum active resources per wait. Zero is unlimited. |
+| `WithInterval(time.Duration)` | `5*time.Second` | Initial exponential base interval |
+| `WithMaxInterval(time.Duration)` | `60*time.Second` | Maximum actual retry delay, including jitter |
+| `WithMaxElapsedTime(time.Duration)` | `0` | Shared wait deadline; `0` disables this limit |
+| `WithMultiplier(float64)` | `1.5` | Growth of the base interval; `1` keeps it constant |
+| `WithRandomizationFactor(float64)` | `0.5` | Jitter factor; `0` disables jitter |
+| `WithAttemptObserver(func(Attempt))` | `nil` | Optional retry notification |
+
+Intervals use durations directly, with no conversion from seconds. The base
+interval grows exponentially; jitter varies it by the configured factor above or
+below the base, and the resulting delay is capped at the maximum interval.
+Every resource has independent backoff state. A multiplier above one increases
+the base by at least one nanosecond per retry until it reaches the cap.
+
+Options are applied in order, with the last valid setter winning. Each supplied
+value is validated when applied, so an invalid value remains an error even if a
+later option replaces it. Relationships between final values are checked after
+successful application, before registry freezing or resource work.
+
+Intervals must be positive, the maximum must be at least the initial interval,
+the multiplier must be finite and at least one, jitter must be finite and within
+`[0, 1]`, and elapsed limits must not be negative. Attempt limits must fit in
+`int`; timing values whose jitter calculation could overflow `time.Duration`
+are rejected. Nil options are ignored; a nil observer disables observation.
+
+Invalid options return an error wrapping `ErrInvalidOption`, without `ErrWait`.
+Independent validation failures are joined, and named validation errors from
+`github.com/ziflex/go-options` remain inspectable with `errors.As`. Invalid
+options are never retried.
+No backoff-library types are required in the public API, and backoff-specific
+error types receive no special handling.
+
+## Results and errors
+
+`Test(ctx, resources, ...Option) error` is the convenience form of:
 
 ```go
-const batchSize = 10
+func (r *Runner) Check(ctx context.Context, resources []string, opts ...Option) ([]Result, error)
 
-for i := 0; i < len(resources); i += batchSize {
-    end := i + batchSize
-    if end > len(resources) {
-        end = len(resources)
-    }
-    
-    batch := resources[i:end]
-    err := runner.Test(ctx, batch)
-    if err != nil {
-        return err
-    }
+type Result struct {
+    Resource string
+    Attempts int
+    Duration time.Duration
+    Err      error
+}
+
+type ResourceError struct {
+    Resource string
+    Err      error
+}
+
+type WaitError struct {
+    Errors []ResourceError
 }
 ```
 
-## Contributing
+Valid calls return one result per input, in input order, including duplicates.
+A duplicate URL is resolved and checked independently. `Attempts` counts actual
+`Resource.Test` calls; resolution failures have zero attempts. `Duration` measures
+resolution, tests, delays, and observation after the worker starts. Successful
+results have `Err == nil`. Invalid retry options return nil results and a
+configuration error.
 
-We welcome contributions! Here's how you can help:
+Resource failures return the results together with a `*WaitError`. It retains
+`ErrWait` and ordered `ResourceError` entries in its error tree. Attempt exhaustion
+preserves the final original resource error, rather than collecting every
+intermediate failure. On cancellation, the last failure is joined with the context
+error and any distinct cancellation cause. Completed successes remain successful
+if another resource subsequently times out.
 
-### Adding New Resource Types
+Formatted wait errors omit URL userinfo, query strings, and fragments. For
+sensitive or opaque URLs they also omit the underlying error text, which can
+repeat credentials. Malformed URLs produce a generic message. The original
+location and probe error are available in the result, observer event, and
+`ResourceError` fields. Use those fields only where the raw values are needed.
+For ordinary URLs, probes should return error messages suitable for logging.
 
-1. Create a new repository following the pattern `waitfor-{resourcetype}`
-2. Implement the `Resource` interface:
-   ```go
-   type MyResource struct {
-       url *url.URL
-   }
-   
-   func (r *MyResource) Test(ctx context.Context) error {
-       // Implement your resource test logic
-       return nil
-   }
-   ```
-3. Provide a `Use()` function:
-   ```go
-   func Use() waitfor.ResourceConfig {
-       return waitfor.ResourceConfig{
-           Scheme: []string{"myscheme"},
-           Factory: func(u *url.URL) (waitfor.Resource, error) {
-               return &MyResource{url: u}, nil
-           },
-       }
-   }
-   ```
+```go
+results, err := runner.Check(ctx, resources, waitfor.WithAttempts(3))
+for i, result := range results {
+    fmt.Printf("resource[%d] attempts=%d duration=%s ready=%t\n",
+        i, result.Attempts, result.Duration, result.Err == nil)
+}
 
-### Reporting Issues
+if errors.Is(err, waitfor.ErrInvalidOption) {
+    // Fix the retry configuration; no resources were tested.
+}
+if errors.Is(err, context.DeadlineExceeded) {
+    // Either the caller deadline or the explicit elapsed limit expired.
+}
+var failures *waitfor.WaitError
+if errors.As(err, &failures) {
+    for _, failure := range failures.Errors {
+        fmt.Println(failure)
+    }
+}
+// errors.Is and errors.As also reach the original resource errors.
+```
 
-When reporting issues, please include:
-- Go version
-- `waitfor` version  
-- Resource types and URLs being tested
-- Complete error messages
-- Minimal reproduction case
+Other sentinels are `ErrInvalidArgument` for invalid resource configuration,
+`ErrResourceAlreadyRegistered` for duplicate schemes,
+`ErrResourceNotFound` for unknown schemes, and `ErrRegistryFrozen` for registration
+after waiting begins. URL parser and resource factory errors retain their chains.
 
-### Development Setup
+## Observing retries
 
-```bash
-git clone https://github.com/go-waitfor/waitfor.git
-cd waitfor
-go mod tidy
+```go
+err := runner.Test(ctx, resources,
+    waitfor.WithAttemptObserver(func(a waitfor.Attempt) {
+        failure := waitfor.ResourceError{Resource: a.Resource, Err: a.Err}
+        fmt.Printf("attempt %d failed (%v), retry in %s\n", a.Number, failure, a.Next)
+    }),
+)
+```
+
+The observer runs after a failed attempt when another retry is planned.
+`Number` starts at one, `Err` is the original failure, and `Next` includes jitter
+and the actual delay cap. No notification is sent for successes, resolution
+failures, permanent errors, exhausted attempts, observed cancellation, or delays
+that cannot fit before the deadline. A planned retry may still be canceled
+before it executes.
+
+Callbacks run synchronously and are serialized across resources within a single
+wait. Their cross-resource order is unspecified; results and aggregate errors
+remain ordered. Callbacks must return promptly, and their duration counts toward
+the elapsed limit. Modifying the callback's value argument does not change retry
+policy. Callers sharing callback state across separate concurrent waits must
+synchronize it. Callbacks may update caller-owned logs or metrics without adding
+those dependencies to waitfor.
+
+## Custom resources and registry lifecycle
+
+```go
+type Resource interface {
+    Test(context.Context) error
+}
+
+type ResourceFactory func(*url.URL) (Resource, error)
+
+type ResourceConfig struct {
+    Scheme  []string
+    Factory ResourceFactory
+}
+```
+
+Use `ResourceFunc` for an ad-hoc check:
+
+```go
+runner, err := waitfor.New(waitfor.ResourceConfig{
+    Scheme: []string{"custom"},
+    Factory: func(u *url.URL) (waitfor.Resource, error) {
+        return waitfor.ResourceFunc(func(ctx context.Context) error {
+            return checkDependency(ctx, u)
+        }), nil
+    },
+})
+```
+
+`checkDependency` above is the caller's context-aware readiness function.
+
+All construction errors return a nil runner. `New()` creates an empty registry.
+During setup, `runner.Resources().Register(scheme, factory)` may add more factories.
+Schemes are trimmed, validated as ASCII URL schemes, and lowercased. They must be
+unique both within and across configurations. Empty configurations and nil
+factories are invalid; factories must return usable, non-nil resources.
+
+The first valid `Check`, `Test`, `Run`, or `RunTo` freezes registration
+permanently, even with an empty resource list or an already canceled context.
+Invalid retry options do not freeze it. Every subsequent registration returns
+`ErrRegistryFrozen`.
+
+Registry operations are synchronized. Registration racing the first wait either
+completes before freezing and becomes visible to that wait, or fails as frozen.
+`List()` returns a sorted independent slice. `Resolve(location)` remains available
+after freezing and does not itself freeze registration. Factories execute outside
+registry locks and must support concurrent calls. Shared resource instances must
+also support concurrent tests. A registry must not be copied after first use.
+
+## Waiting before running a command
+
+```go
+output, err := runner.Run(ctx, waitfor.Program{
+    Executable: "myapp",
+    Args:       []string{"--config", "app.yaml"},
+    Resources:  []string{"ready://a"},
+}, waitfor.WithMaxElapsedTime(30*time.Second))
+```
+
+`Run` starts the command after all resources succeed and returns its combined
+stdout and stderr. For long-running or verbose commands, `RunTo` streams both
+to a single writer as output arrives. Writes are serialized. A nil writer
+discards output.
+
+```go
+program := waitfor.Program{Executable: "myapp", WaitDelay: 2 * time.Second}
+err := runner.RunTo(ctx, program, os.Stdout)
+```
+
+Both methods use the caller's context for the command. `WithMaxElapsedTime`
+applies only to readiness. Canceling the caller's context kills the direct
+child, which can produce an `*exec.ExitError`. By default, output collection
+waits for EOF, even if a descendant still holds a pipe after the child exits.
+
+A positive `Program.WaitDelay` sets `exec.Cmd.WaitDelay`. The timer starts on
+context cancellation or direct-child exit, whichever comes first. When it
+expires, Go can close inherited output pipes and return `exec.ErrWaitDelay`
+if the child otherwise succeeded. Descendants can continue running. Streaming
+writers must return promptly. A negative wait delay fails with
+`ErrInvalidArgument` before the readiness checks.
+
+## Breaking changes and migration
+
+- V1 uses `github.com/go-waitfor/waitfor`; v2 uses
+  `github.com/go-waitfor/waitfor/v2`. Existing v1 release tags retain the v1 API.
+  To upgrade after publication, run `go get github.com/go-waitfor/waitfor/v2`,
+  update every core import to `/v2`, and apply the API changes below. The package
+  name remains `waitfor`; source stays at the repository root and the intended
+  first stable release tag is `v2.0.0`.
+- Handle both return values from `New`: `runner, err := waitfor.New(...)`.
+  Duplicate configurations now fail instead of silently overwriting factories.
+- Replace integer-second options with explicit durations:
+  `WithInterval(2*time.Second)` and `WithMaxInterval(30*time.Second)`.
+  Bare integer literals now denote nanoseconds. Typed integer variables require
+  an explicit conversion; there is no compatibility conversion inside waitfor.
+- For the adjacent CLI, handle constructor errors and migrate its interval flags
+  to durations, or explicitly convert its existing seconds at the CLI boundary.
+  The CLI repository is not changed by this library refactor.
+- Move registration before the first wait. Runtime registration after that point
+  returns `ErrRegistryFrozen`.
+- Use keyed fields in `Program` literals. The new `WaitDelay` field defaults to zero.
+- Replace core `Module` and `waitfor.Use(module)` with a direct `ResourceConfig`.
+  Resource-package helpers such as `http.Use()` must return v2 configurations;
+  helpers returning v1 configurations are incompatible with v2 `New`.
+  The `ResourceConfig.Scheme` field and `Resource` interface shape are unchanged,
+  but the module paths give v1 and v2 their own type identities.
+- Replace string matching on wait errors with `errors.Is`/`errors.As`. Error text
+  now identifies resources in input order, and cancellation preserves error chains.
+- Retry interval, multiplier, and jitter settings now take effect. Unlimited
+  attempts have no hidden elapsed limit; configure a caller context or explicit
+  `WithMaxElapsedTime` when a bound is required. Invalid settings fail before work.
+
+## Development
+
+Development requires Go 1.26 or later. CI tests Go 1.26.0 and the current stable release.
+
+```sh
 go test ./...
+go test -race ./...
+go vet ./...
+revive -config revive.toml -formatter stylish -exclude ./vendor/... ./...
 ```
+
+Tests use controlled resources and a helper subprocess, without external services.
 
 ## License
 

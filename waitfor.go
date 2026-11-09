@@ -1,193 +1,193 @@
-// Package waitfor provides utilities for testing and waiting for resource availability
-// before executing programs. It supports various resource types through a plugin system
-// and offers configurable retry mechanisms with exponential backoff.
+// Package waitfor checks resources concurrently with configurable retry delays,
+// attempt limits, and a shared elapsed-time limit. Context cancellation is
+// authoritative; resources must honor their context and return promptly.
 //
-// This package is designed for scenarios where applications need to wait for dependencies
-// like databases, web services, files, or other external resources to be available
-// before starting up.
-//
-// Basic usage:
-//
-//	runner := waitfor.New(
-//		postgres.Use(),
-//		http.Use(),
-//	)
-//
-//	err := runner.Test(ctx, []string{
-//		"postgres://user:pass@localhost:5432/db",
-//		"http://localhost:8080/health",
-//	})
-//
-// The package supports custom resource types through the ResourceConfig interface
-// and provides flexible configuration options for retry behavior and timeouts.
+// Construct a Runner with ResourceConfig values, or register factories through
+// Runner.Resources before the first wait freezes the registry.
+// Check returns ordered results and inspectable errors; Test returns only the
+// error. Run waits for resources before executing a command with the caller's
+// context. Retry options apply only to the waiting phase.
 package waitfor
 
 import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"sync"
-
-	"github.com/cenkalti/backoff/v5"
+	"time"
 )
 
 type (
-	// Program represents a command to execute along with the resources
-	// that must be available before execution. It encapsulates the executable
-	// path, command arguments, and dependency resource URLs.
+	// Program describes a command and the resources it requires before starting.
 	Program struct {
-		Executable string   // The path or name of the executable to run
-		Args       []string // Command line arguments for the executable
-		Resources  []string // List of resource URLs that must be available
+		Executable string
+		Args       []string
+		Resources  []string
+		// WaitDelay bounds waiting for command exit and open output pipes after
+		// cancellation or command exit, as in exec.Cmd.WaitDelay. Zero waits for EOF.
+		WaitDelay time.Duration
 	}
 
-	// Runner is the main component responsible for testing resource availability
-	// and executing programs. It maintains a registry of resource types and
-	// provides methods to test resources and run programs conditionally.
+	// Runner waits for resources and optionally executes programs. A Runner created
+	// with New supports concurrent calls. Its registry freezes on the first valid
+	// wait, even when the resource list is empty.
 	Runner struct {
 		registry *Registry
 	}
+
+	// Result describes one requested resource. Attempts counts Resource.Test calls;
+	// resolution failures have zero attempts. Duration includes resolution, attempts,
+	// delays, and observer calls. Err retains the final resource error, joined with
+	// cancellation errors when applicable. Successful results have a nil Err.
+	Result struct {
+		Resource string
+		Attempts int
+		Duration time.Duration
+		Err      error
+	}
+
+	// Attempt describes a failed attempt for which another retry is planned.
+	// Number starts at one; Next is the scheduled delay, including jitter.
+	Attempt struct {
+		Resource string
+		Number   int
+		Err      error
+		Next     time.Duration
+	}
+
+	// Observer defines a callback function triggered on each retry attempt with details of the current attempt.
+	Observer func(Attempt)
 )
 
-// New creates a new Runner instance with the specified resource configurations.
-// Each ResourceConfig defines how to handle specific resource URL schemes.
-// Multiple configurations can be provided to support different resource types.
-//
-// Example:
-//
-//	runner := waitfor.New(
-//		postgres.Use(),
-//		http.Use(),
-//		fs.Use(),
-//	)
-func New(configurators ...ResourceConfig) *Runner {
-	r := new(Runner)
-	r.registry = newRegistry(configurators)
-
-	return r
-}
-
-// Resources returns the resource registry associated with this Runner.
-// The registry can be used to manually register additional resource types
-// or query available resource schemes.
-func (r *Runner) Resources() *Registry {
-	return r.registry
-}
-
-// Run tests resource availability and executes the given program if all resources are ready.
-// It first validates that all resources specified in program.Resources are available,
-// then executes the program's command if the tests pass. Returns the combined output
-// from the executed command or an error if resources are not ready or execution fails.
-//
-// The setters parameter allows customization of retry behavior, timeouts, and intervals.
-//
-// Example:
-//
-//	program := waitfor.Program{
-//		Executable: "myapp",
-//		Args:       []string{"--config", "prod.yaml"},
-//		Resources:  []string{"postgres://localhost:5432/db", "http://api:8080/health"},
-//	}
-//	output, err := runner.Run(ctx, program, waitfor.WithAttempts(10))
-func (r *Runner) Run(ctx context.Context, program Program, setters ...Option) ([]byte, error) {
-	err := r.Test(ctx, program.Resources, setters...)
-
+// New creates a Runner. Invalid or duplicate resource configurations return an
+// error and a nil Runner. New with no configurations creates an empty registry.
+func New(configs ...ResourceConfig) (*Runner, error) {
+	registry, err := newRegistry(configs)
 	if err != nil {
 		return nil, err
 	}
 
-	cmd := exec.Command(program.Executable, program.Args...)
-
-	return cmd.CombinedOutput()
+	return &Runner{registry: registry}, nil
 }
 
-// Test validates that all specified resources are available and responding correctly.
-// It tests each resource concurrently using their respective Test implementations
-// with configurable retry logic and exponential backoff. Returns an error if any
-// resource fails its availability test after all retry attempts are exhausted.
-//
-// The setters parameter allows customization of retry behavior including:
-// - Initial retry interval (WithInterval)
-// - Maximum retry interval (WithMaxInterval)
-// - Number of retry attempts (WithAttempts)
-// - Multiplier for exponential backoff (WithMultiplier)
-// - Randomization factor for backoff intervals (WithRandomizationFactor)
-//
-// Example:
-//
-//	resources := []string{
-//		"postgres://user:pass@localhost:5432/db",
-//		"http://localhost:8080/health",
-//		"file://./config.json",
-//	}
-//	err := runner.Test(ctx, resources, waitfor.WithAttempts(5), waitfor.WithInterval(2))
-func (r *Runner) Test(ctx context.Context, resources []string, setters ...Option) error {
-	opts := newOptions(setters)
-
-	var buff bytes.Buffer
-	output := r.testAllInternal(ctx, resources, *opts)
-
-	for err := range output {
-		if err != nil {
-			buff.WriteString(err.Error() + ";")
-		}
-	}
-
-	if buff.Len() != 0 {
-		return fmt.Errorf("%s: %s", ErrWait, buff.String())
-	}
-
-	return nil
+// Resources returns the registry for setup and inspection. Registration is
+// allowed only before the first valid wait.
+func (r *Runner) Resources() *Registry {
+	return r.registry
 }
 
-// testAllInternal concurrently tests all provided resources and returns a channel
-// of errors. Each resource is tested in its own goroutine with the specified options.
-// The channel is closed when all tests complete.
-func (r *Runner) testAllInternal(ctx context.Context, resources []string, opts options) <-chan error {
-	var wg sync.WaitGroup
-	wg.Add(len(resources))
+// Run waits for the program's resources, then executes it with the caller's
+// context and returns combined stdout/stderr and the standard os/exec error.
+// WithMaxElapsedTime limits the wait, not the command's execution time.
+func (r *Runner) Run(ctx context.Context, program Program, setters ...Option) ([]byte, error) {
+	var output bytes.Buffer
 
-	output := make(chan error, len(resources))
+	err := r.RunTo(ctx, program, &output, setters...)
 
-	for _, resource := range resources {
-		resource := resource
-
-		go func() {
-			defer wg.Done()
-
-			output <- r.testInternal(ctx, resource, opts)
-		}()
-	}
-
-	go func() {
-		wg.Wait()
-		close(output)
-	}()
-
-	return output
+	return output.Bytes(), err
 }
 
-// testInternal tests a single resource with retry logic using exponential backoff.
-// It resolves the resource from the registry and applies the configured retry
-// strategy until the resource test passes or max attempts are reached.
-func (r *Runner) testInternal(ctx context.Context, resource string, opts options) error {
-	rsc, err := r.registry.Resolve(resource)
+// RunTo waits for readiness and streams the command's combined stdout and stderr
+// to output. Writes are serialized. Nil discards output. A writer must return
+// promptly for cancellation and Program.WaitDelay to take effect.
+func (r *Runner) RunTo(ctx context.Context, program Program, output io.Writer, setters ...Option) error {
+	if program.WaitDelay < 0 {
+		return fmt.Errorf("%w: program wait delay must be nonnegative", ErrInvalidArgument)
+	}
 
-	if err != nil {
+	if err := r.Test(ctx, program.Resources, setters...); err != nil {
 		return err
 	}
 
-	b := backoff.NewExponentialBackOff()
-	b.InitialInterval = opts.interval
-	b.MaxInterval = opts.maxInterval
-	b.Multiplier = opts.multiplier
-	b.RandomizationFactor = opts.randomizationFactor
+	cmd := exec.CommandContext(ctx, program.Executable, program.Args...)
+	cmd.WaitDelay = program.WaitDelay
 
-	_, err = backoff.Retry(ctx, func() (bool, error) {
-		// The return value doesn't matter to us
-		return false, rsc.Test(ctx)
-	}, backoff.WithMaxTries(uint(opts.attempts)))
+	if output != nil {
+		// A shared, comparable writer makes os/exec use one pipe for both streams,
+		// even if the caller's writer has a non-comparable dynamic type.
+		writer := &struct{ io.Writer }{output}
+		cmd.Stdout, cmd.Stderr = writer, writer
+	}
+
+	return cmd.Run()
+}
+
+// Test is the error-only convenience form of Check.
+func (r *Runner) Test(ctx context.Context, resources []string, setters ...Option) error {
+	_, err := r.Check(ctx, resources, setters...)
 
 	return err
+}
+
+// Check waits for all resources concurrently and returns results in input order,
+// including duplicate inputs. Resource failures return a *WaitError alongside
+// the results; they do not cancel other resources. An empty resource list succeeds.
+// Invalid options return nil results and ErrInvalidOption before any resource
+// work or registry freezing. Cancellation is cooperative: factories and observers
+// must return promptly, and Resource.Test must honor its context.
+func (r *Runner) Check(ctx context.Context, resources []string, setters ...Option) ([]Result, error) {
+	opts, err := newOptions(setters)
+	if err != nil {
+		return nil, err
+	}
+
+	factories := r.registry.freeze()
+	if opts.maxElapsedTime > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, opts.maxElapsedTime)
+		defer cancel()
+	}
+
+	if observer := opts.observer; observer != nil {
+		var mu sync.Mutex
+		opts.observer = func(attempt Attempt) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			// Another resource's callback may have consumed the remaining budget.
+			if ctx.Err() == nil && retryFits(ctx, attempt.Next) {
+				observer(attempt)
+			}
+		}
+	}
+
+	results := make([]Result, len(resources))
+	workers := len(resources)
+
+	if opts.maxConcurrency > 0 {
+		workers = min(workers, opts.maxConcurrency)
+	}
+
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for i := range jobs {
+				results[i] = checkResource(ctx, resources[i], factories, opts)
+			}
+		})
+	}
+
+	for i := range resources {
+		jobs <- i
+	}
+
+	close(jobs)
+
+	wg.Wait()
+
+	var failures []ResourceError
+	for _, result := range results {
+		if result.Err != nil {
+			failures = append(failures, ResourceError{Resource: result.Resource, Err: result.Err})
+		}
+	}
+
+	if len(failures) > 0 {
+		return results, &WaitError{Errors: failures}
+	}
+
+	return results, nil
 }

@@ -1,112 +1,162 @@
 package waitfor
 
 import (
+	"errors"
+	"fmt"
+	"math"
 	"time"
+
+	goopt "github.com/ziflex/go-options"
 )
 
 type (
-	// options contains configuration parameters for resource testing behavior.
-	// These options control retry intervals, maximum wait times, and the number
-	// of attempts made when testing resource availability.
 	options struct {
-		interval            time.Duration // Initial retry interval between attempts
-		maxInterval         time.Duration // Maximum interval for exponential backoff
-		attempts            uint64        // Maximum number of retry attempts
-		multiplier          float64       // Multiplier for exponential backoff
-		randomizationFactor float64       // Randomization factor for backoff intervals
+		interval            time.Duration
+		maxInterval         time.Duration
+		maxElapsedTime      time.Duration
+		attempts            uint64
+		maxConcurrency      int
+		multiplier          float64
+		randomizationFactor float64
+		observer            Observer
 	}
 
-	// Option is a function type used to configure options through the functional
-	// options pattern. This allows flexible and extensible configuration of
-	// resource testing behavior.
-	Option func(opts *options)
+	// Option configures a wait. Each supplied value is validated when applied,
+	// even if a later option replaces it. Valid setters apply in order, with the
+	// last winning. Nil options are ignored. Relationships between final values
+	// are checked before the runner performs any resource work.
+	Option = goopt.Option[options]
 )
 
-// newOptions creates a new options instance with default values and applies
-// the provided option setters. Default values are:
-// - interval: 5 seconds
-// - maxInterval: 60 seconds
-// - attempts: 5.
-// - multiplier: 1.5
-// - randomizationFactor: 0.5
-func newOptions(setters []Option) *options {
-	opts := &options{
-		interval:            time.Duration(5) * time.Second,
-		maxInterval:         time.Duration(60) * time.Second,
+var validateOptionRelationships = goopt.Check(func(o options) error {
+	var errs []error
+
+	if o.maxInterval < o.interval {
+		errs = append(errs, goopt.ValidationError{
+			Field:  "max interval",
+			Value:  o.maxInterval.String(),
+			Reason: errors.New("must be at least interval"),
+		})
+	}
+
+	if o.randomizationFactor > 0 && float64(o.maxInterval)*(1+o.randomizationFactor)+1 >= float64(math.MaxInt64) {
+		// The uncapped jitter range must fit in a time.Duration.
+		errs = append(errs, goopt.ValidationError{
+			Field:  "max interval",
+			Value:  o.maxInterval.String(),
+			Reason: errors.New("jitter calculation overflows time.Duration"),
+		})
+	}
+
+	return errors.Join(errs...)
+})
+
+func newOptions(setters []Option) (options, error) {
+	opts := options{
+		interval:            5 * time.Second,
+		maxInterval:         60 * time.Second,
 		attempts:            5,
 		multiplier:          1.5,
 		randomizationFactor: 0.5,
 	}
 
-	for _, setter := range setters {
-		setter(opts)
+	opts, err := goopt.ApplyTo(opts, setters...)
+	if err == nil {
+		err = validateOptionRelationships(opts)
 	}
 
-	return opts
-}
-
-// WithInterval creates an Option that sets the initial retry interval in seconds.
-// This interval is used as the starting point for exponential backoff between
-// retry attempts. The actual interval will increase exponentially up to maxInterval.
-//
-// Example:
-//
-//	runner.Test(ctx, resources, waitfor.WithInterval(2)) // Start with 2 second intervals
-func WithInterval(interval uint64) Option {
-	return func(opts *options) {
-		opts.interval = time.Duration(interval) * time.Second
+	if err != nil {
+		return options{}, fmt.Errorf("%w: %w", ErrInvalidOption, err)
 	}
+
+	return opts, nil
 }
 
-// WithMaxInterval creates an Option that sets the maximum retry interval in seconds.
-// When using exponential backoff, the retry interval will not exceed this value.
-// This prevents excessively long waits between retry attempts.
-//
-// Example:
-//
-//	runner.Test(ctx, resources, waitfor.WithMaxInterval(30)) // Cap at 30 seconds
-func WithMaxInterval(interval uint64) Option {
-	return func(opts *options) {
-		opts.maxInterval = time.Duration(interval) * time.Second
-	}
+// WithInterval sets the initial retry interval. It must be positive; the default
+// is 5 seconds. Durations are used directly, e.g. 500*time.Millisecond.
+func WithInterval(interval time.Duration) Option {
+	return goopt.New(func(opts *options, input time.Duration) { opts.interval = input }).
+		Value(interval).
+		Named("interval").
+		Validators(goopt.Positive[time.Duration]()).
+		Build()
 }
 
-// WithAttempts creates an Option that sets the maximum number of retry attempts.
-// If a resource test fails this many times, the resource is considered unavailable.
-// Set to 0 for unlimited attempts (not recommended without context timeout).
-//
-// Example:
-//
-//	runner.Test(ctx, resources, waitfor.WithAttempts(10)) // Try up to 10 times
+// WithMaxInterval caps the actual retry delay, including jitter. It must be
+// positive and at least the initial interval; the default is 60 seconds.
+func WithMaxInterval(interval time.Duration) Option {
+	return goopt.New(func(opts *options, input time.Duration) { opts.maxInterval = input }).
+		Value(interval).
+		Named("max interval").
+		Validators(goopt.Positive[time.Duration]()).
+		Build()
+}
+
+// WithAttempts limits the total Resource.Test calls per resource, including the
+// first call. The default is 5. Zero means unlimited attempts, subject only to
+// success, a permanent probe failure, cancellation, or the elapsed-time limit.
+// A nonzero limit must fit in an int, as used by Result.Attempts.
 func WithAttempts(attempts uint64) Option {
-	return func(opts *options) {
-		opts.attempts = attempts
-	}
+	return goopt.New(func(opts *options, input uint64) { opts.attempts = input }).
+		Value(attempts).
+		Named("attempts").
+		Validators(goopt.Max(uint64(^uint(0) >> 1))).
+		Build()
 }
 
-// WithMultiplier creates an Option that sets the multiplier for exponential backoff.
-// This value determines how quickly the retry interval increases after each attempt.
-// A higher multiplier results in faster growth of the interval.
-//
-// Example:
-//
-//	runner.Test(ctx, resources, waitfor.WithMultiplier(2.0)) // Double the interval each time
+// WithMaxConcurrency bounds the number of active resources within one wait.
+// A slot covers resolution, attempts and retry delays. Zero (the default) is
+// unlimited. Negative limits are invalid.
+func WithMaxConcurrency(limit int) Option {
+	return goopt.New(func(opts *options, input int) { opts.maxConcurrency = input }).
+		Value(limit).
+		Named("max concurrency").
+		Validators(goopt.NonNegative[int]()).
+		Build()
+}
+
+// WithMaxElapsedTime sets one deadline shared by all resources in a wait. Zero
+// (the default) disables this limit. Negative values are invalid. The earlier
+// caller deadline wins. Expiration cancels context-aware attempts and is
+// inspectable as context.DeadlineExceeded. This option does not limit a Program.
+func WithMaxElapsedTime(limit time.Duration) Option {
+	return goopt.New(func(opts *options, input time.Duration) { opts.maxElapsedTime = input }).
+		Value(limit).
+		Named("max elapsed time").
+		Validators(goopt.NonNegative[time.Duration]()).
+		Build()
+}
+
+// WithMultiplier sets exponential growth between retries. It must be finite and
+// at least 1; 1 gives a constant base interval. The default is 1.5.
 func WithMultiplier(multiplier float64) Option {
-	return func(opts *options) {
-		opts.multiplier = multiplier
-	}
+	return goopt.New(func(opts *options, input float64) { opts.multiplier = input }).
+		Value(multiplier).
+		Named("multiplier").
+		Validators(goopt.Between[float64](1, math.MaxFloat64)).
+		Build()
 }
 
-// WithRandomizationFactor creates an Option that sets the randomization factor for
-// exponential backoff. This factor introduces jitter to the retry intervals,
-// helping to prevent thundering herd problems when multiple clients are retrying
-// simultaneously.
-//
-// Example:
-//
-//	runner.Test(ctx, resources, waitfor.WithRandomizationFactor(0.5)) // 50% jitter
+// WithRandomizationFactor sets jitter in the range [0, 1]. The default is 0.5;
+// zero disables jitter. Actual delays remain capped by WithMaxInterval. Timing
+// values whose jitter calculation could overflow time.Duration are invalid.
 func WithRandomizationFactor(factor float64) Option {
-	return func(opts *options) {
-		opts.randomizationFactor = factor
-	}
+	return goopt.New(func(opts *options, input float64) { opts.randomizationFactor = input }).
+		Value(factor).
+		Named("randomization factor").
+		Validators(goopt.Between[float64](0, 1)).
+		Build()
+}
+
+// WithAttemptObserver observes failed attempts when another retry is planned.
+// Calls are synchronous and serialized within each wait. The
+// callback must return promptly; its duration counts toward the wait deadline.
+// It cannot change the retry decision or delay through its arguments. A planned
+// retry may still be canceled before execution. Callers sharing callback state
+// across separate concurrent waits must synchronize that state. Nil disables it.
+func WithAttemptObserver(fn func(Attempt)) Option {
+	return goopt.New(func(opts *options, input func(Attempt)) { opts.observer = input }).
+		Value(fn).
+		Named("attempt observer").
+		Build()
 }
