@@ -75,14 +75,21 @@ func main() {
 
 ## What ends a wait
 
-Each resource is resolved once and tested concurrently with the others. The first
-test runs immediately. A resource finishes when it succeeds, its total attempt
-limit is reached, or its context is canceled. Resolution errors finish immediately
-without retrying. A failed resource does not cancel its siblings.
+Each resource is resolved once and tested as soon as its worker starts. By
+default, all resources can run concurrently. Use `WithMaxConcurrency(n)` to
+process up to `n` resources at a time per wait. Each resource holds its slot
+through resolution, tests, retry delays, and observer calls. With unlimited
+attempts, an unavailable resource can hold its slot until cancellation. Queued
+resources share the wait deadline. If canceled before starting, they report zero attempts.
 
-`WithAttempts(0)` means unlimited attempts. There is no implicit elapsed-time
-limit from the backoff dependency. With unlimited attempts and no explicit
-elapsed limit, failed checks continue until the caller cancels the context.
+A resource finishes on success, a resolution error, a permanent probe error,
+attempt exhaustion, or cancellation. Its siblings continue independently. Return
+`waitfor.Permanent(err)` from a probe when retrying cannot help, for example
+after an authentication failure. The marker works through wrapping and preserves
+the original error for `errors.Is` and `errors.As`. `Permanent(nil)` returns nil.
+
+`WithAttempts(0)` permits unlimited attempts. Retryable failures continue
+until success or cancellation by the caller or the configured elapsed limit.
 
 A positive `WithMaxElapsedTime` creates one deadline shared by all resources,
 starting before dispatch. The earlier of this deadline and the caller's deadline
@@ -102,6 +109,7 @@ with a canceled context.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `WithAttempts(uint64)` | `5` | Total test calls per resource, including the first; `0` is unlimited |
+| `WithMaxConcurrency(int)` | `0` | Maximum active resources per wait. Zero is unlimited. |
 | `WithInterval(time.Duration)` | `5*time.Second` | Initial exponential base interval |
 | `WithMaxInterval(time.Duration)` | `60*time.Second` | Maximum actual retry delay, including jitter |
 | `WithMaxElapsedTime(time.Duration)` | `0` | Shared wait deadline; `0` disables this limit |
@@ -112,7 +120,8 @@ with a canceled context.
 Intervals use durations directly, with no conversion from seconds. The base
 interval grows exponentially; jitter varies it by the configured factor above or
 below the base, and the resulting delay is capped at the maximum interval.
-Every resource has independent backoff state.
+Every resource has independent backoff state. A multiplier above one increases
+the base by at least one nanosecond per retry until it reaches the cap.
 
 Options are applied in order, with the last valid setter winning. Each supplied
 value is validated when applied, so an invalid value remains an error even if a
@@ -159,9 +168,9 @@ type WaitError struct {
 Valid calls return one result per input, in input order, including duplicates.
 A duplicate URL is resolved and checked independently. `Attempts` counts actual
 `Resource.Test` calls; resolution failures have zero attempts. `Duration` measures
-resolution, tests, delays, and observation for that resource. Successful results
-have `Err == nil`. Invalid retry options return nil results and a configuration
-error.
+resolution, tests, delays, and observation after the worker starts. Successful
+results have `Err == nil`. Invalid retry options return nil results and a
+configuration error.
 
 Resource failures return the results together with a `*WaitError`. It retains
 `ErrWait` and ordered `ResourceError` entries in its error tree. Attempt exhaustion
@@ -170,11 +179,18 @@ intermediate failure. On cancellation, the last failure is joined with the conte
 error and any distinct cancellation cause. Completed successes remain successful
 if another resource subsequently times out.
 
+Formatted wait errors omit URL userinfo, query strings, and fragments. For
+sensitive or opaque URLs they also omit the underlying error text, which can
+repeat credentials. Malformed URLs produce a generic message. The original
+location and probe error are available in the result, observer event, and
+`ResourceError` fields. Use those fields only where the raw values are needed.
+For ordinary URLs, probes should return error messages suitable for logging.
+
 ```go
 results, err := runner.Check(ctx, resources, waitfor.WithAttempts(3))
-for _, result := range results {
-    fmt.Printf("%s: attempts=%d duration=%s err=%v\n",
-        result.Resource, result.Attempts, result.Duration, result.Err)
+for i, result := range results {
+    fmt.Printf("resource[%d] attempts=%d duration=%s ready=%t\n",
+        i, result.Attempts, result.Duration, result.Err == nil)
 }
 
 if errors.Is(err, waitfor.ErrInvalidOption) {
@@ -186,7 +202,7 @@ if errors.Is(err, context.DeadlineExceeded) {
 var failures *waitfor.WaitError
 if errors.As(err, &failures) {
     for _, failure := range failures.Errors {
-        fmt.Printf("%s: %v\n", failure.Resource, failure.Err)
+        fmt.Println(failure)
     }
 }
 // errors.Is and errors.As also reach the original resource errors.
@@ -202,8 +218,8 @@ after waiting begins. URL parser and resource factory errors retain their chains
 ```go
 err := runner.Test(ctx, resources,
     waitfor.WithAttemptObserver(func(a waitfor.Attempt) {
-        fmt.Printf("%s attempt %d failed: %v; retry in %s\n",
-            a.Resource, a.Number, a.Err, a.Next)
+        failure := waitfor.ResourceError{Resource: a.Resource, Err: a.Err}
+        fmt.Printf("attempt %d failed (%v), retry in %s\n", a.Number, failure, a.Next)
     }),
 )
 ```
@@ -211,8 +227,9 @@ err := runner.Test(ctx, resources,
 The observer runs after a failed attempt when another retry is planned.
 `Number` starts at one, `Err` is the original failure, and `Next` includes jitter
 and the actual delay cap. No notification is sent for successes, resolution
-failures, exhausted attempts, observed cancellation, or a delay that cannot fit
-before the deadline. A planned retry may still be canceled before it executes.
+failures, permanent errors, exhausted attempts, observed cancellation, or delays
+that cannot fit before the deadline. A planned retry may still be canceled
+before it executes.
 
 Callbacks run synchronously and are serialized across resources within a single
 wait. Their cross-resource order is unspecified; results and aggregate errors
@@ -254,13 +271,14 @@ runner, err := waitfor.New(waitfor.ResourceConfig{
 
 All construction errors return a nil runner. `New()` creates an empty registry.
 During setup, `runner.Resources().Register(scheme, factory)` may add more factories.
-Schemes are trimmed and lowercased, must follow URL scheme syntax, and must be
+Schemes are trimmed, validated as ASCII URL schemes, and lowercased. They must be
 unique both within and across configurations. Empty configurations and nil
 factories are invalid; factories must return usable, non-nil resources.
 
-The first valid `Check`, `Test`, or `Run` freezes registration permanently, even
-with an empty resource list or an already canceled context. Invalid retry options
-do not freeze it. Every subsequent registration returns `ErrRegistryFrozen`.
+The first valid `Check`, `Test`, `Run`, or `RunTo` freezes registration
+permanently, even with an empty resource list or an already canceled context.
+Invalid retry options do not freeze it. Every subsequent registration returns
+`ErrRegistryFrozen`.
 
 Registry operations are synchronized. Registration racing the first wait either
 completes before freezing and becomes visible to that wait, or fails as frozen.
@@ -279,12 +297,27 @@ output, err := runner.Run(ctx, waitfor.Program{
 }, waitfor.WithMaxElapsedTime(30*time.Second))
 ```
 
-`Run` starts the command only after all resources succeed. It uses
-`exec.CommandContext` with the caller's context, returning combined stdout/stderr
-and standard `os/exec` errors. Canceling the caller context terminates the launched
-process according to those semantics. A killed command may return `*exec.ExitError`;
-do not assume its error is `context.Canceled`. The elapsed-time option applies to
-waiting only, so use a caller deadline to bound command execution too.
+`Run` starts the command after all resources succeed and returns its combined
+stdout and stderr. For long-running or verbose commands, `RunTo` streams both
+to a single writer as output arrives. Writes are serialized. A nil writer
+discards output.
+
+```go
+program := waitfor.Program{Executable: "myapp", WaitDelay: 2 * time.Second}
+err := runner.RunTo(ctx, program, os.Stdout)
+```
+
+Both methods use the caller's context for the command. `WithMaxElapsedTime`
+applies only to readiness. Canceling the caller's context kills the direct
+child, which can produce an `*exec.ExitError`. By default, output collection
+waits for EOF, even if a descendant still holds a pipe after the child exits.
+
+A positive `Program.WaitDelay` sets `exec.Cmd.WaitDelay`. The timer starts on
+context cancellation or direct-child exit, whichever comes first. When it
+expires, Go can close inherited output pipes and return `exec.ErrWaitDelay`
+if the child otherwise succeeded. Descendants can continue running. Streaming
+writers must return promptly. A negative wait delay fails with
+`ErrInvalidArgument` before the readiness checks.
 
 ## Breaking changes and migration
 
@@ -305,6 +338,7 @@ waiting only, so use a caller deadline to bound command execution too.
   The CLI repository is not changed by this library refactor.
 - Move registration before the first wait. Runtime registration after that point
   returns `ErrRegistryFrozen`.
+- Use keyed fields in `Program` literals. The new `WaitDelay` field defaults to zero.
 - Replace core `Module` and `waitfor.Use(module)` with a direct `ResourceConfig`.
   Resource-package helpers such as `http.Use()` must return v2 configurations;
   helpers returning v1 configurations are incompatible with v2 `New`.
@@ -318,7 +352,7 @@ waiting only, so use a caller deadline to bound command execution too.
 
 ## Development
 
-Development requires Go 1.25 or later.
+Development requires Go 1.26 or later. CI tests Go 1.26.0 and the current stable release.
 
 ```sh
 go test ./...

@@ -3,9 +3,8 @@ package waitfor
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
 	"time"
-
-	"github.com/cenkalti/backoff/v5"
 )
 
 func checkResource(ctx context.Context, location string, factories map[string]ResourceFactory, opts options) (result Result) {
@@ -30,12 +29,7 @@ func checkResource(ctx context.Context, location string, factories map[string]Re
 		return result
 	}
 
-	delays := backoff.NewExponentialBackOff()
-	delays.InitialInterval = opts.interval
-	delays.MaxInterval = opts.maxInterval
-	delays.Multiplier = opts.multiplier
-	delays.RandomizationFactor = opts.randomizationFactor
-	delays.Reset()
+	base := opts.interval
 
 	for {
 		if err := cancellationError(ctx, result.Err); err != nil {
@@ -52,11 +46,13 @@ func checkResource(ctx context.Context, location string, factories map[string]Re
 
 		if err := cancellationError(ctx, result.Err); err != nil {
 			result.Err = err
+
 			return result
 		}
 
 		if err == nil {
 			result.Err = nil
+
 			return result
 		}
 
@@ -64,14 +60,47 @@ func checkResource(ctx context.Context, location string, factories map[string]Re
 			return result
 		}
 
-		next := min(delays.NextBackOff(), opts.maxInterval)
+		if _, permanent := errors.AsType[*permanentError](err); permanent {
+			return result
+		}
+
+		next := opts.retryDelay(base)
 
 		if opts.observer != nil && retryFits(ctx, next) {
 			opts.observer(Attempt{Resource: location, Number: result.Attempts, Err: err, Next: next})
 		}
 
 		waitForRetry(ctx, next)
+		base = opts.nextInterval(base)
 	}
+}
+
+func (o options) nextInterval(base time.Duration) time.Duration {
+	if o.multiplier == 1 || base == o.maxInterval {
+		return base
+	}
+
+	scaled := float64(base) * o.multiplier
+	if scaled >= float64(o.maxInterval) {
+		return o.maxInterval
+	}
+
+	// A fractional nanosecond of growth would otherwise round down forever.
+	return max(base+1, time.Duration(scaled))
+}
+
+func (o options) retryDelay(base time.Duration) time.Duration {
+	if o.randomizationFactor == 0 {
+		return base
+	}
+
+	spread := float64(base) * o.randomizationFactor
+	delay := float64(base) - spread + rand.Float64()*(2*spread+1)
+	if delay >= float64(o.maxInterval) {
+		return o.maxInterval
+	}
+
+	return time.Duration(delay)
 }
 
 func retryFits(ctx context.Context, delay time.Duration) bool {
@@ -90,6 +119,7 @@ func waitForRetry(ctx context.Context, delay time.Duration) {
 
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
+
 	select {
 	case <-ctx.Done():
 	case <-timer.C:
@@ -103,9 +133,9 @@ func cancellationError(ctx context.Context, last error) error {
 	}
 
 	cause := context.Cause(ctx)
-	if !errors.Is(cause, err) {
-		return errors.Join(last, err, cause)
+	if errors.Is(cause, err) {
+		return errors.Join(last, cause)
 	}
 
-	return errors.Join(last, err)
+	return errors.Join(last, err, cause)
 }

@@ -18,16 +18,19 @@ type Registry struct {
 
 func newRegistry(configs []ResourceConfig) (*Registry, error) {
 	r := &Registry{}
+
 	for _, config := range configs {
 		if len(config.Scheme) == 0 {
 			return nil, fmt.Errorf("%w: resource config must contain a scheme", ErrInvalidArgument)
 		}
+
 		for _, scheme := range config.Scheme {
 			if err := r.Register(scheme, config.Factory); err != nil {
 				return nil, err
 			}
 		}
 	}
+
 	return r, nil
 }
 
@@ -43,10 +46,12 @@ func (r *Registry) Register(scheme string, factory ResourceFactory) error {
 		return ErrRegistryFrozen
 	}
 
-	scheme = strings.ToLower(strings.TrimSpace(scheme))
+	scheme = strings.TrimSpace(scheme)
 	if !validScheme(scheme) {
-		return fmt.Errorf("%w: invalid resource scheme %q", ErrInvalidArgument, scheme)
+		return fmt.Errorf("%w: invalid resource scheme", ErrInvalidArgument)
 	}
+
+	scheme = strings.ToLower(scheme)
 
 	if factory == nil {
 		return fmt.Errorf("%w: nil factory for %s", ErrInvalidArgument, scheme)

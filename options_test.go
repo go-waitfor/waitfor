@@ -181,6 +181,7 @@ func TestInvalidOptionsDoNoWork(t *testing.T) {
 		{"infinite jitter", []Option{WithRandomizationFactor(math.Inf(1))}},
 		{"negative infinite jitter", []Option{WithRandomizationFactor(math.Inf(-1))}},
 		{"negative elapsed", []Option{WithMaxElapsedTime(-time.Second)}},
+		{"negative concurrency", []Option{WithMaxConcurrency(-1)}},
 		{"unrepresentable attempts", []Option{WithAttempts(math.MaxUint64)}},
 		{"attempts above platform maximum", []Option{WithAttempts(uint64(^uint(0)>>1) + 1)}},
 		{"jitter overflow", []Option{WithMaxInterval(math.MaxInt64)}},

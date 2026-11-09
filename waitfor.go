@@ -3,14 +3,17 @@
 // authoritative; resources must honor their context and return promptly.
 //
 // Construct a Runner with ResourceConfig values, or register factories through
-// Runner.Resources before the first Check, Test, or Run freezes the registry.
+// Runner.Resources before the first wait freezes the registry.
 // Check returns ordered results and inspectable errors; Test returns only the
 // error. Run waits for resources before executing a command with the caller's
 // context. Retry options apply only to the waiting phase.
 package waitfor
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"os/exec"
 	"sync"
 	"time"
@@ -22,11 +25,14 @@ type (
 		Executable string
 		Args       []string
 		Resources  []string
+		// WaitDelay bounds waiting for command exit and open output pipes after
+		// cancellation or command exit, as in exec.Cmd.WaitDelay. Zero waits for EOF.
+		WaitDelay time.Duration
 	}
 
 	// Runner waits for resources and optionally executes programs. A Runner created
 	// with New supports concurrent calls. Its registry freezes on the first valid
-	// Check, Test, or Run, even when the resource list is empty.
+	// wait, even when the resource list is empty.
 	Runner struct {
 		registry *Registry
 	}
@@ -67,7 +73,7 @@ func New(configs ...ResourceConfig) (*Runner, error) {
 }
 
 // Resources returns the registry for setup and inspection. Registration is
-// allowed only before the first valid Check, Test, or Run.
+// allowed only before the first valid wait.
 func (r *Runner) Resources() *Registry {
 	return r.registry
 }
@@ -76,11 +82,36 @@ func (r *Runner) Resources() *Registry {
 // context and returns combined stdout/stderr and the standard os/exec error.
 // WithMaxElapsedTime limits the wait, not the command's execution time.
 func (r *Runner) Run(ctx context.Context, program Program, setters ...Option) ([]byte, error) {
-	if err := r.Test(ctx, program.Resources, setters...); err != nil {
-		return nil, err
+	var output bytes.Buffer
+
+	err := r.RunTo(ctx, program, &output, setters...)
+
+	return output.Bytes(), err
+}
+
+// RunTo waits for readiness and streams the command's combined stdout and stderr
+// to output. Writes are serialized. Nil discards output. A writer must return
+// promptly for cancellation and Program.WaitDelay to take effect.
+func (r *Runner) RunTo(ctx context.Context, program Program, output io.Writer, setters ...Option) error {
+	if program.WaitDelay < 0 {
+		return fmt.Errorf("%w: program wait delay must be nonnegative", ErrInvalidArgument)
 	}
 
-	return exec.CommandContext(ctx, program.Executable, program.Args...).CombinedOutput()
+	if err := r.Test(ctx, program.Resources, setters...); err != nil {
+		return err
+	}
+
+	cmd := exec.CommandContext(ctx, program.Executable, program.Args...)
+	cmd.WaitDelay = program.WaitDelay
+
+	if output != nil {
+		// A shared, comparable writer makes os/exec use one pipe for both streams,
+		// even if the caller's writer has a non-comparable dynamic type.
+		writer := &struct{ io.Writer }{output}
+		cmd.Stdout, cmd.Stderr = writer, writer
+	}
+
+	return cmd.Run()
 }
 
 // Test is the error-only convenience form of Check.
@@ -123,15 +154,27 @@ func (r *Runner) Check(ctx context.Context, resources []string, setters ...Optio
 	}
 
 	results := make([]Result, len(resources))
-	var wg sync.WaitGroup
-	wg.Add(len(resources))
+	workers := len(resources)
 
-	for i, resource := range resources {
-		go func() {
-			defer wg.Done()
-			results[i] = checkResource(ctx, resource, factories, opts)
-		}()
+	if opts.maxConcurrency > 0 {
+		workers = min(workers, opts.maxConcurrency)
 	}
+
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for i := range jobs {
+				results[i] = checkResource(ctx, resources[i], factories, opts)
+			}
+		})
+	}
+
+	for i := range resources {
+		jobs <- i
+	}
+
+	close(jobs)
 
 	wg.Wait()
 

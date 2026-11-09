@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
@@ -548,6 +549,154 @@ func TestCheckDoesNotInterpretBackoffErrors(t *testing.T) {
 	require.ErrorIs(t, err, failure)
 	assert.Same(t, failure, results[0].Err)
 	assert.Equal(t, 2, results[0].Attempts)
+}
+
+func TestCheckRedactsSensitiveLocations(t *testing.T) {
+	for _, tc := range []struct{ location, label string }{
+		{"test://example-user:example-pass@host/db", "test://host/db"},
+		{"test://host/db?token=example-token", "test://host/db"},
+		{"test://host/db#example-fragment", "test://host/db"},
+		{"test:example-opaque", "test:"},
+	} {
+		failure := fmt.Errorf("probe failed for %s", tc.location)
+		runner := testRunner(t, func(*url.URL) (Resource, error) {
+			return ResourceFunc(func(context.Context) error { return failure }), nil
+		})
+		results, err := runner.Check(testContext(t), []string{tc.location}, WithAttempts(1))
+		require.ErrorIs(t, err, failure)
+		require.Equal(t, tc.location, results[0].Resource)
+		require.Same(t, failure, results[0].Err)
+		var entry ResourceError
+		require.ErrorAs(t, err, &entry)
+		require.Equal(t, tc.location, entry.Resource)
+		for _, formatted := range []string{entry.Error(), err.Error()} {
+			assert.Contains(t, formatted, tc.label)
+			assert.NotContains(t, formatted, "example-")
+		}
+	}
+}
+
+func TestMalformedResourceURLErrors(t *testing.T) {
+	const location = "test://user:secret-password@host:secret-port/db?token=secret-token"
+	runner := testRunner(t, readyFactory)
+	_, resolveErr := runner.Resources().Resolve(location)
+	results, checkErr := runner.Check(testContext(t), []string{location})
+	require.Equal(t, location, results[0].Resource)
+	require.Zero(t, results[0].Attempts)
+	for _, err := range []error{resolveErr, results[0].Err, checkErr} {
+		var parseErr *url.Error
+		require.ErrorAs(t, err, &parseErr)
+		assert.Equal(t, location, parseErr.URL)
+		assert.NotContains(t, err.Error(), "secret-")
+	}
+
+	// A missing colon makes this a valid relative path to the URL parser.
+	err := runner.Test(testContext(t), []string{"test//user:secret-password@host/db"})
+	require.ErrorIs(t, err, ErrResourceNotFound)
+	require.NotContains(t, err.Error(), "secret-password")
+}
+
+func TestCheckPermanentFailure(t *testing.T) {
+	cause := errors.New("access denied")
+	failure := fmt.Errorf("probe: %w", Permanent(cause))
+	runner := testRunner(t, func(u *url.URL) (Resource, error) {
+		return ResourceFunc(func(context.Context) error {
+			if u.Host == "bad" {
+				return failure
+			}
+			return Permanent(nil)
+		}), nil
+	})
+	results, err := runner.Check(testContext(t), []string{"test://bad", "test://ready"}, WithAttempts(0),
+		WithAttemptObserver(func(Attempt) { t.Error("permanent failure scheduled a retry") }))
+	require.ErrorIs(t, err, cause)
+	require.Same(t, failure, results[0].Err)
+	require.Equal(t, 1, results[0].Attempts)
+	require.NoError(t, results[1].Err)
+}
+
+func TestCheckWrappedCancellationCause(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	shutdown, denied := errors.New("service shutting down"), errors.New("access denied")
+	cause := errors.Join(context.Canceled, shutdown)
+	runner := testRunner(t, func(*url.URL) (Resource, error) {
+		return ResourceFunc(func(context.Context) error {
+			cancel(cause)
+			return Permanent(denied)
+		}), nil
+	})
+	results, err := runner.Check(ctx, []string{"test://host"})
+	for _, target := range []error{context.Canceled, cause, shutdown, denied} {
+		require.ErrorIs(t, err, target)
+		require.ErrorIs(t, results[0].Err, target)
+	}
+}
+
+func TestBackoffFractionalNanosecondGrowth(t *testing.T) {
+	failure := errors.New("offline")
+	runner := testRunner(t, func(*url.URL) (Resource, error) {
+		return ResourceFunc(func(context.Context) error { return failure }), nil
+	})
+	var delays []time.Duration
+	err := runner.Test(testContext(t), []string{"test://host"}, WithInterval(1), WithMaxInterval(7),
+		WithMultiplier(1.5), WithRandomizationFactor(0), WithAttempts(8),
+		WithAttemptObserver(func(a Attempt) { delays = append(delays, a.Next) }))
+	require.ErrorIs(t, err, failure)
+	require.Equal(t, []time.Duration{1, 2, 3, 4, 6, 7, 7}, delays)
+}
+
+func TestCheckConcurrencyLimit(t *testing.T) {
+	for _, stopEarly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancel=%t", stopEarly), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				inputs := []string{"test://a", "test://b", "test://a", "test://c"}
+				resolved := make(chan string, len(inputs))
+				release := make(chan struct{})
+				runner := testRunner(t, func(u *url.URL) (Resource, error) {
+					resolved <- u.Host
+					return ResourceFunc(func(ctx context.Context) error {
+						select {
+						case <-release:
+							return nil
+						case <-ctx.Done():
+							return ctx.Err()
+						}
+					}), nil
+				})
+				var results []Result
+				var err error
+				go func() { results, err = runner.Check(ctx, inputs, WithMaxConcurrency(2)) }()
+				synctest.Wait()
+				require.Len(t, resolved, 2)
+				if stopEarly {
+					cancel()
+				} else {
+					close(release)
+				}
+				synctest.Wait()
+				require.Len(t, results, len(inputs))
+				if stopEarly {
+					require.ErrorIs(t, err, context.Canceled)
+					require.Len(t, resolved, 2)
+				} else {
+					require.NoError(t, err)
+					require.Len(t, resolved, len(inputs))
+				}
+				for i, r := range results {
+					assert.Equal(t, inputs[i], r.Resource)
+					if stopEarly && i >= 2 {
+						assert.Zero(t, r.Attempts)
+						assert.ErrorIs(t, r.Err, context.Canceled)
+					} else {
+						assert.Equal(t, 1, r.Attempts)
+					}
+				}
+			})
+		})
+	}
 }
 
 func TestRunnerConcurrentChecks(t *testing.T) {

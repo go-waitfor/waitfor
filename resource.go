@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"reflect"
 )
 
 type (
@@ -18,7 +19,7 @@ type (
 	}
 
 	// Resource tests availability. Test returns nil when ready and must honor
-	// cancellation. All errors from Test are retryable until a configured boundary.
+	// cancellation. Errors are retryable unless marked with Permanent.
 	// Factories returning shared resources must make their Test calls concurrency-safe.
 	Resource interface {
 		Test(ctx context.Context) error
@@ -28,11 +29,16 @@ type (
 	ResourceFunc func(context.Context) error
 )
 
+// Test invokes fn with the supplied context.
+func (fn ResourceFunc) Test(ctx context.Context) error {
+	return fn(ctx)
+}
+
 // resolveResource performs no locking while invoking the selected factory.
 func resolveResource(location string, lookup func(string) ResourceFactory) (Resource, error) {
 	u, err := url.Parse(location)
 	if err != nil {
-		return nil, err
+		return nil, invalidResourceURL{err}
 	}
 
 	factory := lookup(u.Scheme)
@@ -45,14 +51,22 @@ func resolveResource(location string, lookup func(string) ResourceFactory) (Reso
 		return nil, err
 	}
 
-	if resource == nil {
+	if nilResource(resource) {
 		return nil, fmt.Errorf("%w: factory for %s returned a nil resource", ErrInvalidArgument, u.Scheme)
 	}
 
 	return resource, nil
 }
 
-// Test invokes fn with the supplied context.
-func (fn ResourceFunc) Test(ctx context.Context) error {
-	return fn(ctx)
+func nilResource(resource Resource) bool {
+	v := reflect.ValueOf(resource)
+
+	switch v.Kind() {
+	case reflect.Invalid:
+		return true
+	case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
 }

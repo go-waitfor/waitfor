@@ -2,8 +2,6 @@ package waitfor
 
 import (
 	"errors"
-	"fmt"
-	"strings"
 )
 
 var (
@@ -24,48 +22,29 @@ var (
 	ErrResourceNotFound = errors.New("resource with a given scheme is not found")
 )
 
-// ResourceError associates a failed resource with its original error.
-type ResourceError struct {
-	Resource string
-	Err      error
-}
-
-// Error identifies the resource and describes its failure.
-func (e ResourceError) Error() string {
-	return fmt.Sprintf("%s: %v", e.Resource, e.Err)
-}
-
-// Unwrap preserves the original error for errors.Is and errors.As.
-func (e ResourceError) Unwrap() error {
-	return e.Err
-}
-
-// WaitError aggregates failed resources in input order.
-type WaitError struct {
-	Errors []ResourceError
-}
-
-// Error describes all failed resources in deterministic input order.
-func (e *WaitError) Error() string {
-	var message strings.Builder
-	message.WriteString(ErrWait.Error())
-	for i, failure := range e.Errors {
-		if i == 0 {
-			message.WriteString(": ")
-		} else {
-			message.WriteString("; ")
-		}
-		message.WriteString(failure.Error())
+type (
+	// url.Parse errors can repeat credentials in both the URL and the parse reason.
+	invalidResourceURL struct {
+		cause error
 	}
-	return message.String()
+
+	permanentError struct{ error }
+)
+
+func (invalidResourceURL) Error() string {
+	return "invalid resource URL"
 }
 
-// Unwrap exposes ErrWait and each resource failure for errors.Is and errors.As.
-func (e *WaitError) Unwrap() []error {
-	errs := make([]error, 1, len(e.Errors)+1)
-	errs[0] = ErrWait
-	for _, failure := range e.Errors {
-		errs = append(errs, failure)
+func (e invalidResourceURL) Unwrap() error { return e.cause }
+
+func (e permanentError) Unwrap() error { return e.error }
+
+// Permanent marks a probe failure as terminal for this resource. It preserves
+// err for errors.Is and errors.As, even under further wrapping. Permanent(nil)
+// returns nil.
+func Permanent(err error) error {
+	if err == nil {
+		return nil
 	}
-	return errs
+	return &permanentError{err}
 }

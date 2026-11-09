@@ -178,3 +178,44 @@ func TestRegistryPreservesFactoryErrors(t *testing.T) {
 	var parseError *url.Error
 	assert.ErrorAs(t, err, &parseError)
 }
+
+func TestRegistryRejectsUnicodeSchemeBeforeFolding(t *testing.T) {
+	var registry Registry
+	require.ErrorIs(t, registry.Register("FİLE", readyFactory), ErrInvalidArgument)
+	require.NoError(t, registry.Register(" FILE ", readyFactory))
+	_, err := registry.Resolve("FiLe://host/path")
+	require.NoError(t, err)
+}
+
+type valueResource struct{}
+
+func (valueResource) Test(context.Context) error { return nil }
+
+func TestFactoryResourceValues(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		resource Resource
+		valid    bool
+	}{
+		{"nil function", ResourceFunc(nil), false},
+		{"nil pointer", (*valueResource)(nil), false},
+		{"value", valueResource{}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := testRunner(t, func(*url.URL) (Resource, error) { return tc.resource, nil })
+			resource, err := runner.Resources().Resolve("test://host")
+			results, checkErr := runner.Check(testContext(t), []string{"test://host"})
+			if tc.valid {
+				require.NoError(t, err)
+				require.Equal(t, tc.resource, resource)
+				require.NoError(t, checkErr)
+				require.Equal(t, 1, results[0].Attempts)
+				return
+			}
+			require.Nil(t, resource)
+			require.ErrorIs(t, err, ErrInvalidArgument)
+			require.ErrorIs(t, checkErr, ErrInvalidArgument)
+			require.Zero(t, results[0].Attempts)
+		})
+	}
+}

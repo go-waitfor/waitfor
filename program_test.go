@@ -1,6 +1,7 @@
 package waitfor
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -36,6 +37,38 @@ func TestProgramHelperProcess(t *testing.T) {
 	case "fail":
 		fmt.Fprint(os.Stderr, "command failure")
 		os.Exit(7)
+	case "stream":
+		fmt.Fprint(os.Stdout, "hello")
+		for {
+			if _, err := os.Stat(args[len(args)-1]); err == nil {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		fmt.Fprint(os.Stderr, "stderr")
+		os.Exit(0)
+	case "spawn", "spawn-wait":
+		child := helperProgram(t, "hold-pipe", "")
+		cmd := exec.Command(child.Executable, child.Args...)
+		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+		require.NoError(t, cmd.Start())
+		require.NoError(t, cmd.Process.Release())
+		fmt.Fprint(os.Stdout, "spawned")
+		if args[len(args)-2] == "spawn-wait" {
+			time.Sleep(time.Minute)
+		}
+		os.Exit(0)
+	case "hold-pipe":
+		// Exit as soon as the reader closes the inherited pipe. The fallback
+		// keeps a regression from hanging the test indefinitely.
+		end := time.Now().Add(10 * time.Second)
+		for time.Now().Before(end) {
+			time.Sleep(50 * time.Millisecond)
+			if _, err := fmt.Fprint(os.Stdout, "."); err != nil {
+				break
+			}
+		}
+		os.Exit(0)
 	case "wait":
 		if err := os.WriteFile(args[len(args)-1], []byte("started"), 0600); err != nil {
 			t.Fatal(err)
@@ -44,6 +77,77 @@ func TestProgramHelperProcess(t *testing.T) {
 		os.Exit(0)
 	default:
 		t.Fatal("unknown helper mode")
+	}
+}
+
+type outputFunc func([]byte) (int, error)
+
+func (f outputFunc) Write(p []byte) (int, error) { return f(p) }
+
+func TestRunToStreamsBeforeCommandExit(t *testing.T) {
+	runner := testRunner(t, readyFactory)
+	marker := filepath.Join(t.TempDir(), "received")
+	var output bytes.Buffer
+	writer := outputFunc(func(p []byte) (int, error) {
+		if output.Len() == 0 {
+			if err := os.WriteFile(marker, nil, 0600); err != nil {
+				return 0, err
+			}
+		}
+		return output.Write(p)
+	})
+	program := helperProgram(t, "stream", marker)
+	program.Resources = []string{"test://ready"}
+	require.NoError(t, runner.RunTo(testContext(t), program, writer))
+	require.Equal(t, "hellostderr", output.String())
+
+	program = helperProgram(t, "echo", "")
+	require.NoError(t, runner.RunTo(testContext(t), program, nil))
+	program.Resources = []string{"unregistered://host"}
+	output.Reset()
+	require.ErrorIs(t, runner.RunTo(testContext(t), program, writer), ErrResourceNotFound)
+	require.Empty(t, output.String())
+}
+
+func TestProgramWaitDelay(t *testing.T) {
+	runner := testRunner(t, readyFactory)
+	program := helperProgram(t, "spawn", "")
+	program.WaitDelay = -1
+	out, err := runner.Run(testContext(t), program)
+	require.ErrorIs(t, err, ErrInvalidArgument)
+	require.Nil(t, out)
+	require.NoError(t, runner.Resources().Register("another", readyFactory))
+
+	// The direct child exits successfully while its descendant holds stdout.
+	program.WaitDelay = 25 * time.Millisecond
+	out, err = runner.Run(testContext(t), program)
+	require.ErrorIs(t, err, exec.ErrWaitDelay)
+	require.Contains(t, string(out), "spawned")
+
+	// Cancellation kills the direct child. Return while its descendant still
+	// owns the write end, preserving the original command error.
+	ctx, cancel := context.WithCancel(testContext(t))
+	defer cancel()
+	program = helperProgram(t, "spawn-wait", "")
+	program.WaitDelay = 25 * time.Millisecond
+	var output bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		done <- runner.RunTo(ctx, program, outputFunc(func(p []byte) (int, error) {
+			n, err := output.Write(p)
+			if bytes.Contains(output.Bytes(), []byte("spawned")) {
+				cancel()
+			}
+			return n, err
+		}))
+	}()
+	select {
+	case err := <-done:
+		var exitErr *exec.ExitError
+		require.ErrorAs(t, err, &exitErr)
+		require.Contains(t, output.String(), "spawned")
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunTo did not release inherited pipes after cancellation")
 	}
 }
 

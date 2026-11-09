@@ -15,6 +15,7 @@ type (
 		maxInterval         time.Duration
 		maxElapsedTime      time.Duration
 		attempts            uint64
+		maxConcurrency      int
 		multiplier          float64
 		randomizationFactor float64
 		observer            Observer
@@ -23,7 +24,7 @@ type (
 	// Option configures a wait. Each supplied value is validated when applied,
 	// even if a later option replaces it. Valid setters apply in order, with the
 	// last winning. Nil options are ignored. Relationships between final values
-	// are checked before Check, Test, or Run performs any resource work.
+	// are checked before the runner performs any resource work.
 	Option = goopt.Option[options]
 )
 
@@ -39,8 +40,7 @@ var validateOptionRelationships = goopt.Check(func(o options) error {
 	}
 
 	if o.randomizationFactor > 0 && float64(o.maxInterval)*(1+o.randomizationFactor)+1 >= float64(math.MaxInt64) {
-		// The delay generator randomizes before we cap the actual delay. Reject
-		// values that could overflow its float-to-duration conversion first.
+		// The uncapped jitter range must fit in a time.Duration.
 		errs = append(errs, goopt.ValidationError{
 			Field:  "max interval",
 			Value:  o.maxInterval.String(),
@@ -94,13 +94,24 @@ func WithMaxInterval(interval time.Duration) Option {
 
 // WithAttempts limits the total Resource.Test calls per resource, including the
 // first call. The default is 5. Zero means unlimited attempts, subject only to
-// success, caller cancellation, or an explicitly configured elapsed-time limit.
+// success, a permanent probe failure, cancellation, or the elapsed-time limit.
 // A nonzero limit must fit in an int, as used by Result.Attempts.
 func WithAttempts(attempts uint64) Option {
 	return goopt.New(func(opts *options, input uint64) { opts.attempts = input }).
 		Value(attempts).
 		Named("attempts").
 		Validators(goopt.Max(uint64(^uint(0) >> 1))).
+		Build()
+}
+
+// WithMaxConcurrency bounds the number of active resources within one wait.
+// A slot covers resolution, attempts and retry delays. Zero (the default) is
+// unlimited. Negative limits are invalid.
+func WithMaxConcurrency(limit int) Option {
+	return goopt.New(func(opts *options, input int) { opts.maxConcurrency = input }).
+		Value(limit).
+		Named("max concurrency").
+		Validators(goopt.NonNegative[int]()).
 		Build()
 }
 
@@ -138,7 +149,7 @@ func WithRandomizationFactor(factor float64) Option {
 }
 
 // WithAttemptObserver observes failed attempts when another retry is planned.
-// Calls are synchronous and serialized within each Check, Test, or Run. The
+// Calls are synchronous and serialized within each wait. The
 // callback must return promptly; its duration counts toward the wait deadline.
 // It cannot change the retry decision or delay through its arguments. A planned
 // retry may still be canceled before execution. Callers sharing callback state
